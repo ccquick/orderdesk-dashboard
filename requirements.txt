@@ -2,3 +2,4 @@ streamlit==1.33.0
 pandas
 gspread
 google-auth         # gives you google.oauth2.service_account
+holidays
