@@ -44,9 +44,11 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
+    # rename if necessary
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
+    # core casts
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -57,6 +59,7 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
+    # business‐day logic
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     def next_open_day(d):
@@ -66,6 +69,7 @@ def load_data():
         return c
     tomorrow = next_open_day(today)
 
+    # bucket
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -87,7 +91,6 @@ def main():
 
     # ─── KPIs ─────────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
-
     overdue_orders = set(
         df.loc[
             (df["Bucket"] == "Overdue") |
@@ -99,7 +102,6 @@ def main():
         df["Bucket"] == "Due Tomorrow",
         "Document Number"
     ].nunique()
-
     c1.metric("Overdue", len(overdue_orders))
     c2.metric("Due Tomorrow", int(due_tomorrow_count))
 
@@ -128,6 +130,7 @@ def main():
     for bucket, tab in tabs.items():
         sub = df[df["Bucket"] == bucket]
         if bucket == "Overdue":
+            # include partially-shipped under “Overdue”
             sub = pd.concat(
                 [sub, df[df["Status"] == "Pending Billing/Partially Fulfilled"]],
                 ignore_index=True,
@@ -137,7 +140,7 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # build summary
+        # build the one-row‐per‐order summary
         summary = (
             sub.groupby(
                 ["Document Number", "Name", "Ship Date", "Status"],
@@ -162,27 +165,30 @@ def main():
             lambda o: "⚠️" if o in chem_orders else ""
         )
 
-        # style only overdue tab
+        # drop the “Outstanding” column and hide the index
+        display = summary.drop(columns=["Outstanding"])
+
         if bucket == "Overdue":
+            # color-style only the Overdue tab
             def _row_style(r):
-                color = (
-                    "#fff3cd"
+                return [
+                    "background-color: #fff3cd"
                     if r["Status"] == "Pending Billing/Partially Fulfilled"
-                    else "#f8d7da"
-                )
-                return [f"background-color: {color}"] * len(r)
+                    else "background-color: #f8d7da"
+                ] * len(r)
 
             styler = (
-                summary.style
+                display.style
+                .hide_index()
                 .apply(_row_style, axis=1)
                 .set_properties(**{"text-align": "left"})
             )
             tab.dataframe(styler, use_container_width=True)
         else:
-            tab.dataframe(summary, use_container_width=True)
+            # Due Tomorrow: just show it cleanly
+            tab.dataframe(display.style.hide_index(), use_container_width=True)
 
-        # —— DRILL-DOWN DROPDOWN & DETAILS —— 
-        # build labels from summary
+        # ─── DRILL‐DOWN ───────────────────────────────────────────────────────────
         labels = summary.apply(
             lambda r: (
                 f"Order {r['Order #']} — {r['Customer']} "
