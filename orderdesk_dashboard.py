@@ -3,8 +3,6 @@ import json
 import base64
 
 import pandas as pd
-pd.set_option("display.max_colwidth", None)
-
 import streamlit as st
 import gspread
 from google.oauth2 import service_account
@@ -19,7 +17,7 @@ SHEET_URL = (
     "edit?gid=1789939189"
 )
 RAW_TAB_NAME = "raw_orders"
-LOCAL_TZ = "America/Toronto"
+LOCAL_TZ     = "America/Toronto"
 # -----------------------------------------------------------------------------
 
 def get_worksheet():
@@ -40,31 +38,27 @@ def get_worksheet():
 
 
 def load_data():
-    ws = get_worksheet()
-    df = pd.DataFrame(ws.get_all_records())
+    ws   = get_worksheet()
+    data = ws.get_all_records()
+    df   = pd.DataFrame(data)
 
     # rename if needed
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
-    # cast
-    df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
-    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
-    df["Quantity Fulfilled/Received"] = pd.to_numeric(
-        df["Quantity Fulfilled/Received"], errors="coerce"
-    )
-    df["Outstanding Qty"] = (
-        df["Quantity"].fillna(0)
-        - df["Quantity Fulfilled/Received"].fillna(0)
-    )
+    # core casts
+    df["Ship Date"]                = pd.to_datetime(df["Ship Date"], errors="coerce")
+    df["Quantity"]                 = pd.to_numeric(df["Quantity"], errors="coerce")
+    df["Quantity Fulfilled/Received"] = pd.to_numeric(df["Quantity Fulfilled/Received"], errors="coerce")
+    df["Outstanding Qty"]          = df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
 
-    # Ontario business-day
+    # business‐day tomorrow
     ca_holidays = holidays.CA(prov="ON")
-    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
+    today       = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     def next_open_day(d):
-        c = d + pd.Timedelta(days=1)
+        c = d + pd.Timedelta(1, "D")
         while c.weekday() >= 5 or c in ca_holidays:
-            c += pd.Timedelta(days=1)
+            c += pd.Timedelta(1, "D")
         return c
     tomorrow = next_open_day(today)
 
@@ -88,16 +82,16 @@ def main():
 
     df = load_data()
 
-    # KPI: count distinct orders
-    overdue_cnt = df.loc[df["Bucket"]=="Overdue","Document Number"].nunique()
-    partial_cnt = df.loc[df["Status"]=="Pending Billing/Partially Fulfilled","Document Number"].nunique()
-    due_cnt     = df.loc[df["Bucket"]=="Due Tomorrow","Document Number"].nunique()
+    # ─── KPIs ─────────────────────────────────────────────────────────────────
+    overdue_cnt = df.loc[df["Bucket"]=="Overdue",      "Document Number"].nunique()
+    partial_cnt = df.loc[df["Status"]=="Pending Billing/Partially Fulfilled", "Document Number"].nunique()
+    due_cnt     = df.loc[df["Bucket"]=="Due Tomorrow", "Document Number"].nunique()
 
     c1, c2 = st.columns(2)
-    c1.metric("Overdue", int(overdue_cnt + partial_cnt))
-    c2.metric("Due Tomorrow", int(due_cnt))
+    c1.metric("Overdue",       int(overdue_cnt + partial_cnt))
+    c2.metric("Due Tomorrow",  int(due_cnt))
 
-    # Sidebar
+    # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
         custs = st.multiselect("Customer", sorted(df["Name"].unique()))
@@ -107,11 +101,11 @@ def main():
         if rush and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize()=="Yes"]
 
-    # Tabs
+    # ─── TABS ─────────────────────────────────────────────────────────────────
     tab_over, tab_due = st.tabs(["Overdue","Due Tomorrow"])
-    tabs = {"Overdue":tab_over, "Due Tomorrow":tab_due}
+    tabs = {"Overdue": tab_over, "Due Tomorrow": tab_due}
 
-    # which orders need the chemical‐flag
+    # compute flag set
     chem_orders = set(
         df.loc[
             (df["Item Type"]=="Assembly/Bill of Materials") &
@@ -123,70 +117,72 @@ def main():
     for bucket, tab in tabs.items():
         sub = df[df["Bucket"]==bucket]
         if bucket=="Overdue":
-            sub = pd.concat([
-                sub,
-                df[df["Status"]=="Pending Billing/Partially Fulfilled"]
-            ], ignore_index=True)
+            # include partial‐fulfill on overdue tab
+            sub = pd.concat([sub, df[df["Status"]=="Pending Billing/Partially Fulfilled"]], ignore_index=True)
 
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # roll‐up per order
+        # build 1-row summary
         summary = (
-            sub.groupby(
-                ["Document Number","Name","Ship Date","Status"], as_index=False
-            )
-            .agg({
-                "Outstanding Qty":"sum",
-                "Quantity Fulfilled/Received":"sum",
-                "Order Delay Comments": lambda s: "\n".join(s.dropna().unique()),
-            })
-            .rename(columns={
-                "Document Number":"Order #",
-                "Name":"Customer",
-                "Ship Date":"Ship Date",
-                "Outstanding Qty":"Outstanding",
-                "Quantity Fulfilled/Received":"Shipped",
-                "Order Delay Comments":"Delay Comments",
-            })
-            .sort_values("Ship Date")
+            sub.groupby(["Document Number","Name","Ship Date","Status"], as_index=False)
+               .agg({
+                   "Outstanding Qty":"sum",
+                   "Quantity Fulfilled/Received":"sum",
+                   "Order Delay Comments": lambda s: "\n".join(s.dropna().unique()),
+               })
+               .rename(columns={
+                   "Document Number":"Order #",
+                   "Name":"Customer",
+                   "Ship Date":"Ship Date",
+                   "Outstanding Qty":"Outstanding",
+                   "Quantity Fulfilled/Received":"Shipped",
+                   "Order Delay Comments":"Delay Comments",
+               })
+               .sort_values("Ship Date")
         )
         summary["Chemical Order Flag"] = summary["Order #"].apply(
             lambda o: "⚠️" if o in chem_orders else ""
         )
 
-        # drop Outstanding & Shipped from the displayed grid
+        # drop those two cols
         display = summary.drop(columns=["Outstanding","Shipped"])
 
         if bucket=="Overdue":
-            def row_style(r):
-                bg = "#fff3cd" if r["Status"]=="Pending Billing/Partially Fulfilled" else "#f8d7da"
-                return [f"background-color: {bg}"]*len(r)
+            def _row_style(r):
+                return [
+                    "background-color: #fff3cd"
+                    if r["Status"]=="Pending Billing/Partially Fulfilled"
+                    else "background-color: #f8d7da"
+                ] * len(r)
 
             styler = (
                 display.style
-                       .apply(row_style, axis=1)
+                       .hide(axis="index")
+                       .apply(_row_style, axis=1)
                        .set_properties(**{"text-align":"left"})
             )
-            tab.dataframe(styler, hide_index=True, use_container_width=True)
+            tab.dataframe(styler, use_container_width=True)
+
         else:
             tab.dataframe(display, hide_index=True, use_container_width=True)
 
-        # drill‐down dropdown
+        # drill-down menu
         labels = summary.apply(
             lambda r: (
                 f"Order {r['Order #']} — {r['Customer']} "
                 f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
             ), axis=1
         ).tolist()
+
         sel = tab.selectbox(
             "Show line-items for…",
             ["— choose an order —"] + labels,
             key=bucket
         )
         if sel!="— choose an order —":
-            no = int(sel.split()[1])
+            no     = int(sel.split()[1])
             detail = sub[sub["Document Number"]==no]
             with tab.expander("▶ Full line-item details", expanded=True):
                 tab.table(
@@ -199,7 +195,7 @@ def main():
                         "Quantity":"Qty Ordered",
                         "Quantity Fulfilled/Received":"Qty Shipped",
                         "Outstanding Qty":"Outstanding",
-                        "Order Delay Comments":"Delay Comments"
+                        "Order Delay Comments":"Delay Comments",
                     })
                 )
 
