@@ -44,11 +44,11 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # unify column name
+    # rename if needed
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
-    # core casts
+    # cast columns
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -59,17 +59,17 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # Ontario biz-day
+    # business calendars
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     def next_open_day(d):
-        c = d + pd.Timedelta(days=1)
+        c = d + pd.Timedelta(1, "D")
         while c.weekday() >= 5 or c in ca_holidays:
-            c += pd.Timedelta(days=1)
+            c += pd.Timedelta(1, "D")
         return c
     tomorrow = next_open_day(today)
 
-    # bucket
+    # buckets
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -157,7 +157,7 @@ def main():
         )
 
         if bucket=="Overdue":
-            # style overdue tab
+            # style with hide_index on the Styler only
             def _row_style(r):
                 return [
                     "background-color: #fff3cd"
@@ -167,17 +167,17 @@ def main():
 
             styler = (
                 summary.style
-                       .hide_index()          # ← **hide the index here**!
+                       .hide_index()          # ← hide index here
                        .apply(_row_style, axis=1)
                        .set_properties(**{"text-align":"left"})
             )
             tab.dataframe(styler, use_container_width=True)
 
         else:
-            # Due Tomorrow: just hide index on the DF directly
+            # Due Tomorrow: just hide index via argument
             tab.dataframe(summary, hide_index=True, use_container_width=True)
 
-        # drill-down dropdown
+        # ─── Drill-down dropdown
         labels = summary.apply(
             lambda r: (
                 f"Order {r['Order #']} — {r['Customer']} "
