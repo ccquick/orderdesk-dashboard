@@ -8,7 +8,6 @@ import gspread
 from google.oauth2 import service_account
 import holidays
 
-# ← install via `pip install streamlit-aggrid`
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 # -----------------------------------------------------------------------------
@@ -55,7 +54,7 @@ def load_data() -> pd.DataFrame:
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # business-day “tomorrow” logic
+    # business‐day “tomorrow” logic
     on_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     def next_open(d):
@@ -101,7 +100,9 @@ def main():
             df = df[df["Rush Order"].str.capitalize()=="Yes"]
 
     # ─── TABS ────────────────
-    tabs = st.tabs(labels=["Overdue", "Due Tomorrow", "Partially Shipped"])
+    # ← pass the list *positionally*, not as `labels=…`
+    tabs = st.tabs(["Overdue", "Due Tomorrow", "Partially Shipped"])
+
     for bucket, tab in zip(["Overdue","Due Tomorrow","Partially Shipped"], tabs):
         sub = df[df["Bucket"] == bucket]
         if sub.empty:
@@ -124,20 +125,20 @@ def main():
             })
             .sort_values("Ship Date")
         )
-        # BOM flag on any overdue BOM item
+        # BOM flag
         def has_bom(o):
-            deets = sub[sub["Document Number"]==o]
+            detail = sub[sub["Document Number"]==o]
             return "⚠️" if (
-                (deets["Item Type"]=="Assembly/Bill of Materials") 
-                & (deets["Outstanding Qty"]>0)
+                (detail["Item Type"]=="Assembly/Bill of Materials")
+                & (detail["Outstanding Qty"]>0)
             ).any() else ""
         summary["BOM Flag"] = summary["Order #"].apply(has_bom)
 
-        # attach detail rows as JSON to each summary
-        items_lookup = {}
-        for order_no in summary["Order #"]:
-            detail = sub[sub["Document Number"]==order_no]
-            items_lookup[order_no] = detail[[
+        # attach line‐items
+        lookup = {}
+        for o in summary["Order #"]:
+            dt = sub[sub["Document Number"]==o]
+            lookup[o] = dt[[
                 "Item","Item Type",
                 "Quantity","Quantity Fulfilled/Received",
                 "Outstanding Qty","Memo"
@@ -145,32 +146,29 @@ def main():
                 "Quantity":"Qty Ordered",
                 "Quantity Fulfilled/Received":"Qty Shipped",
             }).to_dict("records")
-        summary["items"] = summary["Order #"].map(items_lookup)
+        summary["items"] = summary["Order #"].map(lookup)
 
-        # configure AgGrid master/detail
+        # master/detail via AgGrid
         detail_renderer = JsCode("""
         function(params) {
           const eGui = document.createElement('div');
           new agGrid.Grid(eGui, {
             columnDefs:[
-              { field:'Item' },
-              { field:'Item Type' },
-              { field:'Qty Ordered' },
-              { field:'Qty Shipped' },
-              { field:'Outstanding Qty' },
-              { field:'Memo', flex:1 },
+              {field:'Item'},{field:'Item Type'},{field:'Qty Ordered'},
+              {field:'Qty Shipped'},{field:'Outstanding Qty'},{field:'Memo',flex:1},
             ],
             defaultColDef:{flex:1,minWidth:100,sortable:true},
             rowData: params.data.items,
-            domLayout:'autoHeight',
+            domLayout:'autoHeight'
           });
           return eGui;
         }
         """)
-
         gb = GridOptionsBuilder.from_dataframe(summary)
-        gb.configure_default_column(min_column_width=80, flex=1, sortable=True)
-        gb.configure_column("Ship Date", type=["dateColumnFilter","customDateTimeFormat"], custom_format_string="yyyy-MM-dd", flex=1)
+        gb.configure_default_column(flex=1,min_column_width=80,sortable=True)
+        gb.configure_column("Ship Date",
+                             type=["dateColumnFilter","customDateTimeFormat"],
+                             custom_format_string="yyyy-MM-dd")
         gb.configure_column("items", hide=True)
         gb.configure_grid_options(
             masterDetail=True,
@@ -181,11 +179,11 @@ def main():
         gb.configure_pagination(paginationAutoPageSize=True)
         grid_opts = gb.build()
 
-        tab.markdown("**Click the ▶︎ icon on a row to expand its line-items**")
+        tab.markdown("**▶ Click the arrow to expand an order’s line-items**")
         AgGrid(
             summary,
             gridOptions=grid_opts,
-            theme="streamlit",       # or "light"/"dark"
+            theme="streamlit",
             enable_enterprise_modules=False,
             fit_columns_on_grid_load=True,
         )
