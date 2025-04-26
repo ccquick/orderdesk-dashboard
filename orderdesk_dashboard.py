@@ -88,7 +88,6 @@ def main():
     # ─── KPIs ─────────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
 
-    # count distinct orders for each bucket
     overdue_orders = set(
         df.loc[
             (df["Bucket"] == "Overdue") |
@@ -138,6 +137,7 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
+        # build summary
         summary = (
             sub.groupby(
                 ["Document Number", "Name", "Ship Date", "Status"],
@@ -162,6 +162,7 @@ def main():
             lambda o: "⚠️" if o in chem_orders else ""
         )
 
+        # style only overdue tab
         if bucket == "Overdue":
             def _row_style(r):
                 color = (
@@ -179,6 +180,41 @@ def main():
             tab.dataframe(styler, use_container_width=True)
         else:
             tab.dataframe(summary, use_container_width=True)
+
+        # —— DRILL-DOWN DROPDOWN & DETAILS —— 
+        # build labels from summary
+        labels = summary.apply(
+            lambda r: (
+                f"Order {r['Order #']} — {r['Customer']} "
+                f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
+            ),
+            axis=1,
+        ).tolist()
+
+        sel = tab.selectbox(
+            "Show line-items for…",
+            ["— choose an order —"] + labels,
+            key=bucket,
+        )
+        if sel != "— choose an order —":
+            order_no = int(sel.split()[1])
+            detail = sub[sub["Document Number"] == order_no]
+            with tab.expander("▶ Full line-item details", expanded=True):
+                tab.table(
+                    detail[[
+                        "Item",
+                        "Item Type",
+                        "Quantity",
+                        "Quantity Fulfilled/Received",
+                        "Outstanding Qty",
+                        "Memo",
+                    ]]
+                    .rename(columns={
+                        "Quantity": "Qty Ordered",
+                        "Quantity Fulfilled/Received": "Qty Shipped",
+                        "Outstanding Qty": "Outstanding",
+                    })
+                )
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
