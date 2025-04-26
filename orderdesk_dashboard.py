@@ -1,10 +1,10 @@
 import os
-import datetime as dt
+import json
+import base64
 import pandas as pd
 import streamlit as st
-from google.oauth2 import service_account
 import gspread
-import json
+from google.oauth2 import service_account
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
@@ -17,7 +17,6 @@ import json
 # -----------------------------------------------------------------------------
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/edit?gid=1789939189#gid=1789939189"  # 👈 paste your sheet link
-SERVICE_KEY_JSON = os.getenv("GOOGLE_SERVICE_KEY", "path/to/key.json")      # can be set in st.secrets
 RAW_TAB_NAME = "raw_orders"
 LOCAL_TZ = "America/Toronto"
 
@@ -26,27 +25,25 @@ LOCAL_TZ = "America/Toronto"
 # -----------------------------------------------------------------------------
 
 def get_worksheet():
-    key_or_path = SERVICE_KEY_JSON
+    # 1) Grab the Base64-encoded JSON from Secrets
+    b64 = os.getenv("GOOGLE_SERVICE_KEY_B64")
+    if not b64:
+        st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
+        st.stop()
 
-    # If the env-var starts with “{” it’s the JSON itself; else it’s a path.
-    if key_or_path and key_or_path.strip().startswith("{"):
-        info = json.loads(key_or_path)
-        creds = service_account.Credentials.from_service_account_info(
-            info,
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive.readonly",
-            ],
-        )
-    else:
-        creds = service_account.Credentials.from_service_account_file(
-            key_or_path,
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive.readonly",
-            ],
-        )
+    # 2) Decode it back to a JSON dict
+    info = json.loads(base64.b64decode(b64).decode("utf-8"))
 
+    # 3) Build credentials from that dict
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+
+    # 4) Authorize & open the sheet
     client = gspread.authorize(creds)
     sh = client.open_by_url(SHEET_URL)
     return sh.worksheet(RAW_TAB_NAME)
