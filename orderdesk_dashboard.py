@@ -38,12 +38,16 @@ def get_worksheet():
     client = gspread.authorize(creds)
     return client.open_by_url(SHEET_URL).worksheet(RAW_TAB_NAME)
 
+
 def load_data() -> pd.DataFrame:
     ws = get_worksheet()
-    data = ws.get_all_records()
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(ws.get_all_records())
 
-    # cast
+    # — if your new column is named "Type", rename it for consistency —
+    if "Type" in df.columns:
+        df = df.rename(columns={"Type": "Item Type"})
+
+    # 1) Cast types
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -54,22 +58,24 @@ def load_data() -> pd.DataFrame:
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # business‐day “tomorrow” logic
-    on_holidays = holidays.CA(prov="ON")
+    # 2) Compute “today” and our business‐day “tomorrow” in Ontario
+    ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
-    def next_open(d):
+
+    def next_open_day(d: pd.Timestamp) -> pd.Timestamp:
         n = d + pd.Timedelta(days=1)
-        while n.weekday() >= 5 or n in on_holidays:
+        while n.weekday() >= 5 or n in ca_holidays:
             n += pd.Timedelta(days=1)
         return n
-    tomorrow = next_open(today)
 
-    # bucket
+    tomorrow = next_open_day(today)
+
+    # 3) Bucket logic
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
         (df["Outstanding Qty"] > 0)
-          & (df["Quantity Fulfilled/Received"] > 0),
+        & (df["Quantity Fulfilled/Received"] > 0),
     ]
     labels = ["Overdue", "Due Tomorrow", "Partially Shipped"]
     df["Bucket"] = pd.NA
@@ -77,6 +83,7 @@ def load_data() -> pd.DataFrame:
         df.loc[c, "Bucket"] = l
 
     return df
+
 
 def main():
     st.set_page_config(page_title="Orderdesk Dashboard", layout="wide")
@@ -97,10 +104,9 @@ def main():
         if custs:
             df = df[df["Name"].isin(custs)]
         if rush and "Rush Order" in df.columns:
-            df = df[df["Rush Order"].str.capitalize()=="Yes"]
+            df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
     # ─── TABS ────────────────
-    # ← pass the list *positionally*, not as `labels=…`
     tabs = st.tabs(["Overdue", "Due Tomorrow", "Partially Shipped"])
 
     for bucket, tab in zip(["Overdue","Due Tomorrow","Partially Shipped"], tabs):
@@ -109,7 +115,7 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # build summary + detail payload
+        # build summary
         summary = (
             sub
             .groupby(["Document Number","Name","Ship Date"], as_index=False)
@@ -125,21 +131,23 @@ def main():
             })
             .sort_values("Ship Date")
         )
-        # BOM flag
+
+        # BOM‐flag any order that has an outstanding Assembly/Bill of Materials
         def has_bom(o):
-            detail = sub[sub["Document Number"]==o]
+            detail = sub[sub["Document Number"] == o]
             return "⚠️" if (
-                (detail["Item Type"]=="Assembly/Bill of Materials")
-                & (detail["Outstanding Qty"]>0)
+                ("Item Type" in detail.columns)
+                and (detail["Item Type"] == "Assembly/Bill of Materials")
+                & (detail["Outstanding Qty"] > 0)
             ).any() else ""
         summary["BOM Flag"] = summary["Order #"].apply(has_bom)
 
-        # attach line‐items
+        # prepare the nested line‐items for AgGrid’s master/detail
         lookup = {}
         for o in summary["Order #"]:
-            dt = sub[sub["Document Number"]==o]
+            dt = sub[sub["Document Number"] == o]
             lookup[o] = dt[[
-                "Item","Item Type",
+                "Item", "Item Type",
                 "Quantity","Quantity Fulfilled/Received",
                 "Outstanding Qty","Memo"
             ]].rename(columns={
@@ -148,7 +156,7 @@ def main():
             }).to_dict("records")
         summary["items"] = summary["Order #"].map(lookup)
 
-        # master/detail via AgGrid
+        # set up AgGrid
         detail_renderer = JsCode("""
         function(params) {
           const eGui = document.createElement('div');
@@ -190,5 +198,6 @@ def main():
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
