@@ -92,71 +92,55 @@ def main():
 
     df = load_data()
 
-    kpi_cols = st.columns(3)
-    for col, label in zip(kpi_cols, ["Overdue", "Due Tomorrow", "Partially Shipped"]):
-        count = int((df["Bucket"] == label).sum())
-        col.metric(label, f"{count}")
-
-    # Filters
-    with st.sidebar:
-        st.header("Filters")
-        customers = st.multiselect(
-            "Customer", sorted(df["Name"].unique().tolist()), default=None
-        )
-        rush_only = st.checkbox("Rush orders only")
-
-        if customers:
-            df = df[df["Name"].isin(customers)]
-        if rush_only and "Rush Order" in df.columns:
-            df = df[df["Rush Order"].str.capitalize() == "Yes"]
+    # … your KPI and sidebar filters …
 
     # Tabs per bucket
     tab_overdue, tab_due_tomorrow, tab_partial = st.tabs(
         ["Overdue", "Due Tomorrow", "Partially Shipped"]
     )
-
     tab_map = {
         "Overdue": tab_overdue,
         "Due Tomorrow": tab_due_tomorrow,
         "Partially Shipped": tab_partial,
     }
 
-for bucket, tab in tab_map.items():
-    sub = df[df["Bucket"] == bucket]
-    if sub.empty:
-        tab.info(f"No {bucket.lower()} orders 🎉")
-    else:
-        # --- GROUP LINES INTO ONE ROW / ORDER ---
-        agg = (
-            sub
-            .groupby(
-                ["Document Number", "Name", "Ship Date"],
-                as_index=False
+    # ← this loop must live inside main()
+    for bucket, tab in tab_map.items():
+        sub = df[df["Bucket"] == bucket]
+        if sub.empty:
+            tab.info(f"No {bucket.lower()} orders 🎉")
+        else:
+            # --- GROUP LINES INTO ONE ROW / ORDER ---
+            agg = (
+                sub
+                .groupby(
+                    ["Document Number", "Name", "Ship Date"],
+                    as_index=False
+                )
+                .agg({
+                    "Outstanding Qty": "sum",
+                    "Quantity Fulfilled/Received": "sum",
+                    "Item": lambda items: "\n".join(items),
+                    "Memo": lambda memos: "\n".join(memos),
+                })
             )
-            .agg({
-                "Outstanding Qty": "sum",
-                "Quantity Fulfilled/Received": "sum",
-                "Item": lambda items: "\n".join(items),
-                "Memo": lambda memos: "\n".join(memos),
-            })
-        )
-        # --- SHOW THE AGGREGATED TABLE ---
-        tab.dataframe(
-            agg[[
-                "Document Number",
-                "Name",
-                "Ship Date",
-                "Outstanding Qty",
-                "Quantity Fulfilled/Received",
-                "Item",
-                "Memo",
-            ]]
-            .sort_values("Ship Date"),
-            use_container_width=True,
-        )
+            # --- SHOW THE AGGREGATED TABLE ---
+            tab.dataframe(
+                agg[[
+                    "Document Number",
+                    "Name",
+                    "Ship Date",
+                    "Outstanding Qty",
+                    "Quantity Fulfilled/Received",
+                    "Item",
+                    "Memo",
+                ]].sort_values("Ship Date"),
+                use_container_width=True,
+            )
 
-
-    st.caption("Data auto‑refreshes hourly from NetSuite saved search ➜ Google Sheet ➜ Streamlit")
+    st.caption(
+        "Data auto-refreshes hourly from NetSuite saved search ➜ Google Sheet ➜ Streamlit"
+    )
 
 
 if __name__ == "__main__":
