@@ -9,7 +9,7 @@ from google.oauth2 import service_account
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
 # -----------------------------------------------------------------------------
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/edit?gid=1789939189#gid=1789939189"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/edit?gid=1789939189"  # 👈 your sheet link
 RAW_TAB_NAME = "raw_orders"
 LOCAL_TZ = "America/Toronto"
 
@@ -31,6 +31,7 @@ def get_worksheet():
             "https://www.googleapis.com/auth/drive.readonly",
         ],
     )
+
     client = gspread.authorize(creds)
     sh = client.open_by_url(SHEET_URL)
     return sh.worksheet(RAW_TAB_NAME)
@@ -42,20 +43,21 @@ def load_data():
     df = pd.DataFrame(data)
 
     # cast types
-    df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
+    df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce").dt.tz_localize(None)
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
         df["Quantity Fulfilled/Received"], errors="coerce"
     )
-    df["Outstanding Qty"] = df["Quantity"].fillna(0) - df[
-        "Quantity Fulfilled/Received"
-    ].fillna(0)
+    df["Outstanding Qty"] = (
+        df["Quantity"].fillna(0)
+        - df["Quantity Fulfilled/Received"].fillna(0)
+    )
 
-    # normalize to tz-naive
+    # compute today/tomorrow
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     tomorrow = today + pd.Timedelta(days=1)
 
-    # bucket logic
+    # bucket
     conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -74,18 +76,17 @@ def main():
     st.title("📦 Orderdesk Shipment Status Dashboard")
 
     df = load_data()
-
-    # KPIs
+    # metrics
     kpi_cols = st.columns(3)
     for col, label in zip(kpi_cols, ["Overdue", "Due Tomorrow", "Partially Shipped"]):
         count = int((df["Bucket"] == label).sum())
         col.metric(label, f"{count}")
 
-    # Filters
+    # sidebar filters
     with st.sidebar:
         st.header("Filters")
         customers = st.multiselect(
-            "Customer", sorted(df["Name"].unique().tolist()), default=None
+            "Customer", sorted(df["Name"].unique()), default=None
         )
         rush_only = st.checkbox("Rush orders only")
         if customers:
@@ -93,52 +94,41 @@ def main():
         if rush_only and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
-    # Tabs per bucket
-    tab_overdue, tab_due_tomorrow, tab_partial = st.tabs(
-        ["Overdue", "Due Tomorrow", "Partially Shipped"]
-    )
-    tab_map = {
-        "Overdue": tab_overdue,
-        "Due Tomorrow": tab_due_tomorrow,
-        "Partially Shipped": tab_partial,
-    }
+    # tabs
+    tabs = st.tabs(["Overdue", "Due Tomorrow", "Partially Shipped"])
+    tab_map = dict(zip(["Overdue", "Due Tomorrow", "Partially Shipped"], tabs))
 
     for bucket, tab in tab_map.items():
         sub = df[df["Bucket"] == bucket]
-        if sub.empty:
-            tab.info(f"No {bucket.lower()} orders 🎉")
-        else:
-            # aggregated summary per order
-            agg = (
-                sub
-                .groupby(["Document Number", "Name", "Ship Date"], as_index=False)
-                .agg(
-                    Outstanding_Qty=("Outstanding Qty", "sum"),
-                    Received_Qty=("Quantity Fulfilled/Received", "sum"),
-                )
-            )
+        with tab:
+            if sub.empty:
+                st.info(f"No {bucket.lower()} orders 🎉")
+                continue
 
-            # display summary table
-            tab.dataframe(
-                agg.sort_values("Ship Date")[
-                    ["Document Number", "Name", "Ship Date", "Outstanding_Qty", "Received_Qty"]
-                ],
+            # summary table
+            summary = (
+                sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
+                .agg({
+                    "Outstanding Qty": "sum",
+                    "Quantity Fulfilled/Received": "sum",
+                })
+            )
+            st.dataframe(
+                summary.sort_values("Ship Date"),
                 use_container_width=True,
             )
 
-            # per-order expanders
-            for row in agg.itertuples(index=False):
-                order_no = row._1
-                cust = row._2
-                ship = row._3.date()
-                out = row.Outstanding_Qty
-                rec = row.Received_Qty
-                header = f"Order {order_no} — {cust} — Ship: {ship} — Out:{out} | Rcv:{rec}"
-                with tab.expander(header, expanded=False):
-                    details = sub[sub["Document Number"] == order_no][
+            # line‐item expanders
+            for _, order in summary.iterrows():
+                order_no = order["Document Number"]
+                cust = order["Name"]
+                ship_dt = pd.to_datetime(order["Ship Date"]).date()
+                label = f"Order {order_no} — {cust} ({ship_dt})"
+                with st.expander(label, expanded=False):
+                    lines = sub[sub["Document Number"] == order_no][
                         ["Quantity", "Item", "Memo"]
                     ]
-                    tab.table(details.reset_index(drop=True))
+                    st.dataframe(lines, use_container_width=True)
 
     st.caption(
         "Data auto‑refreshes hourly from NetSuite saved search ➜ Google Sheet ➜ Streamlit"
