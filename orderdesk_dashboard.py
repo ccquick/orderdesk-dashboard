@@ -1,14 +1,12 @@
 import os
 import json
 import base64
-
 import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2 import service_account
-import holidays                   # pip install holidays
-from st_aggrid import AgGrid      # pip install st-aggrid
-from st_aggrid import GridOptionsBuilder, JsCode
+import holidays  # pip install holidays
+from st_aggrid import AgGrid, GridOptionsBuilder
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
@@ -37,16 +35,14 @@ def get_worksheet():
         ],
     )
     client = gspread.authorize(creds)
-    return client.open_by_url(SHEET_URL).worksheet(RAW_TAB_NAME)
+    sh = client.open_by_url(SHEET_URL)
+    return sh.worksheet(RAW_TAB_NAME)
 
 
 def load_data():
     ws = get_worksheet()
-    df = pd.DataFrame(ws.get_all_records())
-
-    # If your new column came in as "Type", rename it to "Item Type"
-    if "Type" in df.columns and "Item Type" not in df.columns:
-        df.rename(columns={"Type": "Item Type"}, inplace=True)
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
 
     # cast types
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
@@ -55,31 +51,30 @@ def load_data():
         df["Quantity Fulfilled/Received"], errors="coerce"
     )
     df["Outstanding Qty"] = (
-        df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
+        df["Quantity"].fillna(0)
+        - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # compute business‐day “tomorrow” (skip weekends + ON stat holidays)
-    ca_hols = holidays.CA(prov="ON")
+    # business-day "tomorrow"
+    ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
+    def next_open_day(d):
+        c = d + pd.Timedelta(days=1)
+        while c.weekday() >= 5 or c in ca_holidays:
+            c += pd.Timedelta(days=1)
+        return c
+    tomorrow = next_open_day(today)
 
-    def next_open(d):
-        nd = d + pd.Timedelta(days=1)
-        while nd.weekday() >= 5 or nd in ca_hols:
-            nd += pd.Timedelta(days=1)
-        return nd
-
-    tomorrow = next_open(today)
-
-    # bucket logic
-    conds = [
+    # bucket
+    conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
         (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
     ]
-    labels = ["Overdue", "Due Tomorrow", "Partially Shipped"]
-    df["Bucket"] = pd.NA
-    for c, lbl in zip(conds, labels):
-        df.loc[c, "Bucket"] = lbl
+    choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
+    df["Bucket"] = pd.Series(pd.NA, index=df.index)
+    for cond, label in zip(conditions, choices):
+        df.loc[cond, "Bucket"] = label
 
     return df
 
@@ -90,107 +85,71 @@ def main():
 
     df = load_data()
 
-    # ─── KPIs ───────────────────────────────────────────────────
-    c1, c2, c3 = st.columns(3)
-    for col, lbl in zip((c1, c2, c3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
-        col.metric(lbl, f"{int((df['Bucket']==lbl).sum())}")
+    # KPIs
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Overdue", int((df["Bucket"] == "Overdue").sum()))
+    k2.metric("Due Tomorrow", int((df["Bucket"] == "Due Tomorrow").sum()))
+    k3.metric("Partially Shipped", int((df["Bucket"] == "Partially Shipped").sum()))
 
-    # ─── SIDEBAR FILTERS ───────────────────────────────────────
+    # filters
     with st.sidebar:
         st.header("Filters")
-        custs = st.multiselect("Customer", sorted(df["Name"].unique()), default=[])
-        rush  = st.checkbox("Rush orders only")
-    if custs:
-        df = df[df["Name"].isin(custs)]
-    if rush and "Rush Order" in df.columns:
-        df = df[df["Rush Order"].str.capitalize()=="Yes"]
+        cust = st.multiselect("Customer", sorted(df["Name"].unique()), default=None)
+        rush = st.checkbox("Rush orders only")
+        if cust:
+            df = df[df["Name"].isin(cust)]
+        if rush and "Rush Order" in df.columns:
+            df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
-    # ─── TABS ──────────────────────────────────────────────────
-    tabs = st.tabs(["Overdue","Due Tomorrow","Partially Shipped"])
-    for bucket, tab in zip(["Overdue","Due Tomorrow","Partially Shipped"], tabs):
-        with tab:
-            sub = df[df["Bucket"]==bucket]
-            if sub.empty:
-                st.info(f"No {bucket.lower()} orders 🎉")
-                continue
+    # tabs
+    tab_over, tab_due, tab_part = st.tabs([
+        "Overdue", "Due Tomorrow", "Partially Shipped"
+    ])
+    for bucket, tab in zip(["Overdue","Due Tomorrow","Partially Shipped"],
+                           [tab_over,tab_due,tab_part]):
+        sub = df[df["Bucket"] == bucket]
+        if sub.empty:
+            tab.info(f"No {bucket.lower()} orders 🎉")
+            continue
 
-            # build summary (one‐row‐per‐order)
-            summary = (
-                sub.groupby(
-                    ["Document Number","Name","Ship Date"], as_index=False
-                )
-                .agg({
-                    "Outstanding Qty":"sum",
-                    "Quantity Fulfilled/Received":"sum"
-                })
-                .rename(columns={
-                    "Document Number":"Order #",
-                    "Name":"Customer",
-                    "Ship Date":"Ship Date",
-                    "Outstanding Qty":"Outstanding",
-                    "Quantity Fulfilled/Received":"Shipped",
-                })
-                .sort_values("Ship Date")
-            )
+        # AG-Grid grouping
+        gb = GridOptionsBuilder.from_dataframe(sub)
+        # group by Document Number
+        gb.configure_column("Document Number", rowGroup=True, hide=True)
+        # show first Ship Date & Name per group
+        gb.configure_column("Ship Date", aggFunc="first", headerName="Ship Date")
+        gb.configure_column("Name", aggFunc="first", headerName="Customer")
+        # aggregate qty columns
+        gb.configure_column("Outstanding Qty", aggFunc="sum", headerName="Outstanding")
+        gb.configure_column(
+            "Quantity Fulfilled/Received", aggFunc="sum", headerName="Shipped"
+        )
+        # detail columns
+        gb.configure_column("Item", headerName="Line Item")
+        gb.configure_column("Memo", headerName="Memo")
 
-            # build mapping order→list-of-detail‐dicts
-            detail_map = {}
-            for ord_no in summary["Order #"]:
-                d = sub[sub["Document Number"]==ord_no]
-                detail_map[ord_no] = d[[
-                    "Item",
-                    "Item Type",              # now present
-                    "Quantity",
-                    "Quantity Fulfilled/Received",
-                    "Outstanding Qty",
-                    "Memo",
-                ]].rename(columns={
-                    "Quantity":"Qty Ordered",
-                    "Quantity Fulfilled/Received":"Qty Shipped",
-                    "Outstanding Qty":"Outstanding",
-                }).to_dict("records")
+        gb.configure_grid_options(
+            groupDefaultExpanded=0,  # start collapsed
+            autoGroupColumnDef={
+                "headerName":"Order #",
+                "cellRendererParams": {"suppressCount": True}
+            },
+            defaultColDef={"flex":1, "sortable":True, "filter":True},
+        )
+        grid_opts = gb.build()
 
-            summary["details"] = summary["Order #"].map(detail_map)
-
-            # configure AgGrid master/detail
-            gb = GridOptionsBuilder.from_dataframe(summary)
-            gb.configure_column("details", hide=True)
-            gb.configure_grid_options(
-                masterDetail=True,
-                detailRowAutoHeight=True,
-                detailCellRendererParams={
-                    "detailGridOptions": {
-                        "columnDefs":[
-                            {"field":"Item", "headerName":"Item","flex":1},
-                            {"field":"Item Type","headerName":"Item Type","flex":1},
-                            {"field":"Qty Ordered","headerName":"Qty Ordered","flex":1},
-                            {"field":"Qty Shipped","headerName":"Qty Shipped","flex":1},
-                            {"field":"Outstanding","headerName":"Outstanding","flex":1},
-                            {"field":"Memo","headerName":"Memo","flex":2},
-                        ],
-                        "defaultColDef":{"sortable":True,"resizable":True}
-                    },
-                    "getDetailRowData": JsCode("""
-                        function(params) {
-                          params.successCallback(params.data.details);
-                        }
-                    """),
-                },
-            )
-            grid_opts = gb.build()
-
-            AgGrid(
-                summary,
-                gridOptions=grid_opts,
-                enable_enterprise_modules=True,  # masterDetail needs enterprise
-                allow_unsafe_jscode=True,        # for our JS callback
-                fit_columns_on_grid_load=True,
-                theme="material-dark",
-                key=bucket
-            )
+        tab.markdown(
+            "Click the ▸ to expand each order's line-items"
+        )
+        AgGrid(
+            sub,
+            gridOptions=grid_opts,
+            theme="material-dark",
+            fit_columns_on_grid_load=True,
+            enable_enterprise_modules=False,
+        )
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
