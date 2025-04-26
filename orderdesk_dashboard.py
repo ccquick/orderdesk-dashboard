@@ -8,7 +8,7 @@ from google.oauth2 import service_account
 import holidays  # pip install holidays
 
 # -----------------------------------------------------------------------------
-# CONFIGURATION (edit just this block)
+# CONFIGURATION
 # -----------------------------------------------------------------------------
 SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -42,7 +42,11 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # 1) Cast types
+    # if your sheet named the new column "Type", rename it so the rest of the code can use "Item Type"
+    if "Type" in df.columns and "Item Type" not in df.columns:
+        df = df.rename(columns={"Type": "Item Type"})
+
+    # 1) Cast core columns
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -53,15 +57,15 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # 2) Compute today & next business‐day (ON weekends+stat‐holidays off)
+    # 2) Compute today & next Ontario business‐day
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
     def next_open_day(date: pd.Timestamp) -> pd.Timestamp:
-        candidate = date + pd.Timedelta(days=1)
-        while candidate.weekday() >= 5 or candidate in ca_holidays:
-            candidate += pd.Timedelta(days=1)
-        return candidate
+        d = date + pd.Timedelta(days=1)
+        while d.weekday() >= 5 or d in ca_holidays:
+            d += pd.Timedelta(days=1)
+        return d
 
     tomorrow = next_open_day(today)
 
@@ -88,17 +92,14 @@ def main():
     df = load_data()
 
     # ─── KPIs ─────────────────────────────────────────────────────────────────
-    kpi_cols = st.columns(3)
-    for col, label in zip(kpi_cols, ["Overdue", "Due Tomorrow", "Partially Shipped"]):
-        count = int((df["Bucket"] == label).sum())
-        col.metric(label, f"{count}")
+    c1, c2, c3 = st.columns(3)
+    for col, label in zip((c1, c2, c3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
+        col.metric(label, int((df["Bucket"] == label).sum()))
 
     # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
-        customers = st.multiselect(
-            "Customer", sorted(df["Name"].unique()), default=None
-        )
+        customers = st.multiselect("Customer", sorted(df["Name"].unique()))
         rush_only = st.checkbox("Rush orders only")
         if customers:
             df = df[df["Name"].isin(customers)]
@@ -115,11 +116,11 @@ def main():
         "Partially Shipped": tab_partial,
     }
 
-    # Precompute which orders have an outstanding BOM line
+    # precompute which orders have an outstanding BOM line
     bom_orders = set(
         df.loc[
-            (df["Item Type"] == "Assembly/Bill of Materials") &
-            (df["Outstanding Qty"] > 0),
+            (df["Item Type"] == "Assembly/Bill of Materials")
+            & (df["Outstanding Qty"] > 0),
             "Document Number",
         ].unique()
     )
@@ -130,61 +131,54 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # ── Summary table: one row per order ───────────────────────────────
+        # Summary table (one row per order)
         summary = (
             sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
             .agg({
                 "Outstanding Qty": "sum",
                 "Quantity Fulfilled/Received": "sum",
             })
-            .rename(
-                columns={
-                    "Document Number": "Order #",
-                    "Name": "Customer",
-                    "Ship Date": "Ship Date",
-                    "Outstanding Qty": "Outstanding",
-                    "Quantity Fulfilled/Received": "Shipped",
-                }
-            )
+            .rename(columns={
+                "Document Number": "Order #",
+                "Name": "Customer",
+                "Ship Date": "Ship Date",
+                "Outstanding Qty": "Outstanding",
+                "Quantity Fulfilled/Received": "Shipped",
+            })
             .sort_values("Ship Date")
         )
-
-        # add BOM-flag icon
+        # add BOM flag
         summary["BOM Flag"] = summary["Order #"].apply(
             lambda o: "⚠️" if o in bom_orders else ""
         )
 
         tab.dataframe(summary, use_container_width=True)
 
-        # ── Drill-down selector ──────────────────────────────────────────────
-        order_labels = summary.apply(
-            lambda r: (
-                f"Order {r['Order #']} — {r['Customer']} "
-                f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
-            ),
+        # drill-down selector
+        labels = summary.apply(
+            lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()}) | Out: {r['Outstanding']}",
             axis=1,
         ).tolist()
 
         sel = tab.selectbox(
             "Show line-items for…",
-            ["— choose an order —"] + order_labels,
+            ["— choose an order —"] + labels,
             key=bucket,
         )
-
         if sel != "— choose an order —":
             order_no = int(sel.split()[1])
-            detail_rows = sub[sub["Document Number"] == order_no]
-
+            detail = sub[sub["Document Number"] == order_no]
             with tab.expander("▶ Full line-item details", expanded=True):
                 tab.table(
-                    detail_rows[[
+                    detail[[
                         "Item",
                         "Item Type",
                         "Quantity",
                         "Quantity Fulfilled/Received",
                         "Outstanding Qty",
                         "Memo",
-                    ]].rename(columns={
+                    ]]
+                    .rename(columns={
                         "Quantity": "Qty Ordered",
                         "Quantity Fulfilled/Received": "Qty Shipped",
                         "Outstanding Qty": "Outstanding",
