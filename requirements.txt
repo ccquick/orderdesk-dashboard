@@ -3,3 +3,4 @@ streamlit-aggrid
 holidays  
 gspread  
 google-auth  
+st-aggrid
