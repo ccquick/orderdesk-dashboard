@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import base64
@@ -102,6 +103,7 @@ def main():
 
     df = load_data()
 
+    # KPI counts by unique order #
     overdue_orders = df.loc[
         (df["Bucket"] == "Overdue")
         | (df["Status"] == "Pending Billing/Partially Fulfilled"),
@@ -112,6 +114,7 @@ def main():
     c1.metric("Overdue", int(overdue_orders))
     c2.metric("Due Tomorrow", int(due_orders))
 
+    # Filters
     with st.sidebar:
         st.header("Filters")
         customers = st.multiselect("Customer", sorted(df["Name"].unique()))
@@ -121,6 +124,7 @@ def main():
         if rush_only and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
+    # Tabs
     tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
     tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
 
@@ -137,13 +141,15 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
+        # Summary per order
         summary = (
             sub.groupby(
                 ["Document Number", "Name", "Ship Date", "Status"],
                 as_index=False,
             )
             .agg({
-                "Order Delay Comments": lambda x: "\n".join(x.dropna().unique()),
+                "Order Delay Comments": lambda x: "
+".join(x.dropna().unique()),
                 "Days Overdue": "max",
             })
             .rename(columns={
@@ -156,9 +162,7 @@ def main():
             .sort_values("Ship Date")
         )
 
-        # remove time component
-        summary["Ship Date"] = summary["Ship Date"].dt.date
-
+        # Chemical flag logic
         def has_active_bom(o):
             mask = (
                 (sub["Document Number"] == o)
@@ -170,6 +174,7 @@ def main():
             lambda o: "⚠️" if has_active_bom(o) else ""
         )
 
+        # Columns for display
         cols = [
             "Order #", "Customer", "Ship Date", "Status",
             "Delay Comments", "Chemical Order Flag",
@@ -177,6 +182,7 @@ def main():
         if bucket == "Overdue":
             cols.append("Days Late")
 
+        # Style overdue rows
         if bucket == "Overdue":
             def row_color(r):
                 bg = (
@@ -195,8 +201,9 @@ def main():
         else:
             tab.dataframe(summary[cols], use_container_width=True, hide_index=True)
 
+        # Drilldown
         order_labels = summary.apply(
-            lambda	r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date']})",
+            lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()})",
             axis=1,
         ).tolist()
         sel = tab.selectbox(
@@ -206,26 +213,30 @@ def main():
         )
         if sel != "— choose an order —":
             on = int(sel.split()[1])
-            detail = sub[sub["Document Number"] == on]
-            # dedupe items by item code
-            detail = detail.drop_duplicates(subset=['Item'])
-            with tab.expander("▶ Full line-item details", expanded=True):
-                detail_display = detail[
+            detail = sub[sub["Document Number"] == on].copy()
+            # Deduplicate items
+            detail = detail.drop_duplicates(subset=["Item"])
+            # Highlight outstanding items
+            def detail_color(r):
+                bg = "#fff3cd" if r["Outstanding Qty"] > 0 else ""
+                return [f"background-color: {bg}"] * len(r)
+            styled_detail = (
+                detail[
                     [
                         "Item", "Item Type", "Quantity",
                         "Quantity Fulfilled/Received", "Outstanding Qty", "Memo",
                     ]
-                ].rename(columns={
+                ]
+                .rename(columns={
                     "Quantity": "Qty Ordered",
                     "Quantity Fulfilled/Received": "Qty Shipped",
                     "Outstanding Qty": "Outstanding",
                 })
-                # format numeric columns
-                for c in ['Qty Ordered','Qty Shipped','Outstanding']:
-                    detail_display[c] = detail_display[c].apply(
-                        lambda x: int(x) if float(x).is_integer() else x
-                    )
-                tab.table(detail_display)
+                .style
+                .apply(detail_color, axis=1)
+                .set_properties(**{"text-align": "left"})
+            )
+            tab.dataframe(styled_detail, use_container_width=True, hide_index=True)
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
