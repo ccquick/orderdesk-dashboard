@@ -45,7 +45,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # normalize new “Type” → “Item Type”
+    # rename if necessary
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
@@ -60,11 +60,10 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # Ontario holidays & “today”
+    # holidays + today
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
-    # compute next open day (skip Sat/Sun + stat holidays)
     def next_open_day(d: pd.Timestamp) -> pd.Timestamp:
         c = d + pd.Timedelta(days=1)
         while c.weekday() >= 5 or c in ca_holidays:
@@ -73,7 +72,7 @@ def load_data():
 
     tomorrow = next_open_day(today)
 
-    # bucket assignment
+    # buckets
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -93,82 +92,70 @@ def main():
 
     df, ca_holidays, today = load_data()
 
-    # ─── KPIs ─────────────────────────────────────────────────────────────────
-    c1, c2 = st.columns(2)
-    # count unique orders, not line-items
-    overdue_orders = set(df.loc[df["Bucket"] == "Overdue", "Document Number"])
-    overdue_partial = set(
-        df.loc[df["Status"] == "Pending Billing/Partially Fulfilled", "Document Number"]
-    )
-    c1.metric("Overdue", len(overdue_orders | overdue_partial))
-    due_orders = set(df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"])
-    c2.metric("Due Tomorrow", len(due_orders))
+    # KPI counts by unique orders
+    overdue_set = set(df.loc[df["Bucket"]=="Overdue", "Document Number"])
+    partial_set = set(df.loc[df["Status"]=="Pending Billing/Partially Fulfilled", "Document Number"])
+    due_set     = set(df.loc[df["Bucket"]=="Due Tomorrow", "Document Number"])
 
-    # ─── FILTERS ───────────────────────────────────────────────────────────────
+    c1, c2 = st.columns(2)
+    c1.metric("Overdue", len(overdue_set | partial_set))
+    c2.metric("Due Tomorrow", len(due_set))
+
+    # filters
     with st.sidebar:
         st.header("Filters")
-        customers = st.multiselect("Customer", sorted(df["Name"].unique()))
-        rush_only = st.checkbox("Rush orders only")
-        if customers:
-            df = df[df["Name"].isin(customers)]
-        if rush_only and "Rush Order" in df.columns:
-            df = df[df["Rush Order"].str.capitalize() == "Yes"]
+        cust = st.multiselect("Customer", sorted(df["Name"].unique()))
+        rush = st.checkbox("Rush orders only")
+        if cust:
+            df = df[df["Name"].isin(cust)]
+        if rush and "Rush Order" in df.columns:
+            df = df[df["Rush Order"].str.capitalize()=="Yes"]
 
-    # ─── TABS ─────────────────────────────────────────────────────────────────
-    tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
-    tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
+    # tabs
+    tab_over, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
+    tabs = {"Overdue": tab_over, "Due Tomorrow": tab_due}
 
-    # precompute Chemical-order flag
+    # compute chemical‐order flags
     chem_orders = set(
         df.loc[
-            (df["Item Type"] == "Assembly/Bill of Materials")
-            & (df["Outstanding Qty"] > 0),
-            "Document Number",
+            (df["Item Type"]=="Assembly/Bill of Materials") &
+            (df["Outstanding Qty"]>0),
+            "Document Number"
         ].unique()
     )
-
-    # prepare list of holiday strings for numpy busday_count
     hols = [d.isoformat() for d in ca_holidays]
 
     for bucket, tab in tabs.items():
-        sub = df[df["Bucket"] == bucket].copy()
-
-        # include partial-billing as “overdue”
-        if bucket == "Overdue":
-            extra = df[df["Status"] == "Pending Billing/Partially Fulfilled"]
+        sub = df[df["Bucket"]==bucket].copy()
+        if bucket=="Overdue":
+            extra = df[df["Status"]=="Pending Billing/Partially Fulfilled"]
             sub = pd.concat([sub, extra], ignore_index=True)
 
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # one-row summary per order
+        # aggregate to one row per order
         summary = (
             sub.groupby(
-                ["Document Number", "Name", "Ship Date", "Status"], as_index=False
+                ["Document Number","Name","Ship Date","Status"], as_index=False
             )
             .agg({
-                "Outstanding Qty": "sum",
-                "Quantity Fulfilled/Received": "sum",
-                "Order Delay Comments": lambda x: "\n".join(x.dropna().unique()),
+                "Order Delay Comments": lambda x: "\n".join(x.dropna().unique())
             })
             .rename(columns={
-                "Document Number": "Order #",
-                "Name": "Customer",
-                "Ship Date": "Ship Date",
-                "Outstanding Qty": "Outstanding",
-                "Quantity Fulfilled/Received": "Shipped",
-                "Order Delay Comments": "Delay Comments",
+                "Document Number":"Order #",
+                "Name":"Customer",
+                "Ship Date":"Ship Date",
+                "Order Delay Comments":"Delay Comments"
             })
             .sort_values("Ship Date")
         )
 
-        # Chemical Order Flag
+        # flags & days late
         summary["Chemical Order Flag"] = summary["Order #"].apply(
             lambda o: "⚠️" if o in chem_orders else ""
         )
-
-        # Days Late (business days)
         summary["Days Late"] = summary["Ship Date"].apply(
             lambda d: np.busday_count(
                 d.date().isoformat(),
@@ -178,20 +165,43 @@ def main():
             )
         )
 
-        # styling overdue tab
-        if bucket == "Overdue":
-            def _style(row):
-                # partial vs fully overdue
-                bg = "#fff3cd" if row["Status"] == "Pending Billing/Partially Fulfilled" else "#f8d7da"
-                return [f"background-color: {bg}"] * len(row)
+        # reset index so we don’t get that extra `#` column
+        summary = summary.reset_index(drop=True)
 
-            styled = summary.style.apply(_style, axis=1).set_properties(**{"text-align": "left"})
+        # style background on Overdue tab
+        if bucket=="Overdue":
+            def _row_style(r):
+                bg = "#fff3cd" if r.Status=="Pending Billing/Partially Fulfilled" else "#f8d7da"
+                return [f"background-color: {bg}"]*len(r)
+
+            styled = summary.style.apply(_row_style, axis=1)
             tab.dataframe(styled, use_container_width=True)
         else:
             tab.dataframe(summary, use_container_width=True)
 
-    st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
+        # drill-down dropdown
+        labels = summary.apply(
+            lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()})",
+            axis=1
+        ).tolist()
+
+        sel = tab.selectbox("Show line-items for…", ["— choose an order —"]+labels, key=bucket)
+        if sel!="— choose an order —":
+            ord_num = int(sel.split()[1])
+            detail = sub[sub["Document Number"]==ord_num]
+            with tab.expander("▶ Full line-item details", expanded=True):
+                tab.table(
+                    detail[[
+                        "Item","Item Type","Quantity","Quantity Fulfilled/Received","Outstanding Qty","Memo"
+                    ]].rename(columns={
+                        "Quantity":"Qty Ordered",
+                        "Quantity Fulfilled/Received":"Qty Shipped",
+                        "Outstanding Qty":"Outstanding"
+                    })
+                )
+
+    st.caption("Data auto‐refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
