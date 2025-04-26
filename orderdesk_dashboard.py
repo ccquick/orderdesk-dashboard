@@ -6,8 +6,9 @@ import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2 import service_account
-import holidays  # pip install holidays
-from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
+import holidays                   # pip install holidays
+from st_aggrid import AgGrid      # pip install st-aggrid
+from st_aggrid import GridOptionsBuilder, JsCode
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
@@ -26,6 +27,7 @@ def get_worksheet():
     if not b64:
         st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
         st.stop()
+
     info = json.loads(base64.b64decode(b64).decode("utf-8"))
     creds = service_account.Credentials.from_service_account_info(
         info,
@@ -42,6 +44,10 @@ def load_data():
     ws = get_worksheet()
     df = pd.DataFrame(ws.get_all_records())
 
+    # If your new column came in as "Type", rename it to "Item Type"
+    if "Type" in df.columns and "Item Type" not in df.columns:
+        df.rename(columns={"Type": "Item Type"}, inplace=True)
+
     # cast types
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
@@ -52,19 +58,19 @@ def load_data():
         df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # business-day “tomorrow” (skip Sat/Sun and ON stat holidays)
-    ca_holidays = holidays.CA(prov="ON")
+    # compute business‐day “tomorrow” (skip weekends + ON stat holidays)
+    ca_hols = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
-    def next_open_day(d):
+    def next_open(d):
         nd = d + pd.Timedelta(days=1)
-        while nd.weekday() >= 5 or nd in ca_holidays:
+        while nd.weekday() >= 5 or nd in ca_hols:
             nd += pd.Timedelta(days=1)
         return nd
 
-    tomorrow = next_open_day(today)
+    tomorrow = next_open(today)
 
-    # bucket flags
+    # bucket logic
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -84,68 +90,69 @@ def main():
 
     df = load_data()
 
-    # ─── KPIs ──────────────────────────────────────────────────────────────
-    k1, k2, k3 = st.columns(3)
-    for col, label in zip((k1, k2, k3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
-        col.metric(label, int((df["Bucket"] == label).sum()))
+    # ─── KPIs ───────────────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+    for col, lbl in zip((c1, c2, c3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
+        col.metric(lbl, f"{int((df['Bucket']==lbl).sum())}")
 
-    # ─── SIDEBAR FILTERS ───────────────────────────────────────────────────
+    # ─── SIDEBAR FILTERS ───────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
-        customers = st.multiselect("Customer", sorted(df["Name"].unique()), default=[])
-        rush_only = st.checkbox("Rush orders only")
-    if customers:
-        df = df[df["Name"].isin(customers)]
-    if rush_only and "Rush Order" in df.columns:
-        df = df[df["Rush Order"].str.capitalize() == "Yes"]
+        custs = st.multiselect("Customer", sorted(df["Name"].unique()), default=[])
+        rush  = st.checkbox("Rush orders only")
+    if custs:
+        df = df[df["Name"].isin(custs)]
+    if rush and "Rush Order" in df.columns:
+        df = df[df["Rush Order"].str.capitalize()=="Yes"]
 
-    # ─── TABS ───────────────────────────────────────────────────────────────
-    tabs = st.tabs(["Overdue", "Due Tomorrow", "Partially Shipped"])
+    # ─── TABS ──────────────────────────────────────────────────
+    tabs = st.tabs(["Overdue","Due Tomorrow","Partially Shipped"])
     for bucket, tab in zip(["Overdue","Due Tomorrow","Partially Shipped"], tabs):
         with tab:
-            sub = df[df["Bucket"] == bucket]
+            sub = df[df["Bucket"]==bucket]
             if sub.empty:
                 st.info(f"No {bucket.lower()} orders 🎉")
                 continue
 
-            # ─ Summary: one row per order ────────────────────────────────
+            # build summary (one‐row‐per‐order)
             summary = (
                 sub.groupby(
-                    ["Document Number", "Name", "Ship Date"], as_index=False
+                    ["Document Number","Name","Ship Date"], as_index=False
                 )
                 .agg({
-                    "Outstanding Qty": "sum",
-                    "Quantity Fulfilled/Received": "sum",
+                    "Outstanding Qty":"sum",
+                    "Quantity Fulfilled/Received":"sum"
                 })
                 .rename(columns={
-                    "Document Number": "Order #",
-                    "Name": "Customer",
-                    "Ship Date": "Ship Date",
-                    "Outstanding Qty": "Outstanding",
-                    "Quantity Fulfilled/Received": "Shipped",
+                    "Document Number":"Order #",
+                    "Name":"Customer",
+                    "Ship Date":"Ship Date",
+                    "Outstanding Qty":"Outstanding",
+                    "Quantity Fulfilled/Received":"Shipped",
                 })
                 .sort_values("Ship Date")
             )
 
-            # attach line-items as a list for each order
+            # build mapping order→list-of-detail‐dicts
             detail_map = {}
-            for order in summary["Order #"]:
-                rows = sub[sub["Document Number"] == order]
-                detail_map[order] = rows[[
+            for ord_no in summary["Order #"]:
+                d = sub[sub["Document Number"]==ord_no]
+                detail_map[ord_no] = d[[
                     "Item",
-                    "Item Type",
+                    "Item Type",              # now present
                     "Quantity",
                     "Quantity Fulfilled/Received",
                     "Outstanding Qty",
-                    "Memo"
+                    "Memo",
                 ]].rename(columns={
-                    "Quantity": "Qty Ordered",
-                    "Quantity Fulfilled/Received": "Qty Shipped",
+                    "Quantity":"Qty Ordered",
+                    "Quantity Fulfilled/Received":"Qty Shipped",
+                    "Outstanding Qty":"Outstanding",
                 }).to_dict("records")
 
             summary["details"] = summary["Order #"].map(detail_map)
 
-            # ─ Build Ag-Grid master/detail ───────────────────────────────
+            # configure AgGrid master/detail
             gb = GridOptionsBuilder.from_dataframe(summary)
             gb.configure_column("details", hide=True)
             gb.configure_grid_options(
@@ -153,37 +160,37 @@ def main():
                 detailRowAutoHeight=True,
                 detailCellRendererParams={
                     "detailGridOptions": {
-                        "columnDefs": [
-                            {"field":"Item","headerName":"Item","flex":1},
+                        "columnDefs":[
+                            {"field":"Item", "headerName":"Item","flex":1},
                             {"field":"Item Type","headerName":"Item Type","flex":1},
                             {"field":"Qty Ordered","headerName":"Qty Ordered","flex":1},
                             {"field":"Qty Shipped","headerName":"Qty Shipped","flex":1},
                             {"field":"Outstanding","headerName":"Outstanding","flex":1},
                             {"field":"Memo","headerName":"Memo","flex":2},
                         ],
-                        "defaultColDef": {"sortable":True,"resizable":True}
+                        "defaultColDef":{"sortable":True,"resizable":True}
                     },
                     "getDetailRowData": JsCode("""
                         function(params) {
                           params.successCallback(params.data.details);
                         }
                     """),
-                }
+                },
             )
-            gridOptions = gb.build()
+            grid_opts = gb.build()
 
             AgGrid(
                 summary,
-                gridOptions=gridOptions,
-                enable_enterprise_modules=True,   # masterDetail is an enterprise feature
-                allow_unsafe_jscode=True,         # to allow our JS callback
+                gridOptions=grid_opts,
+                enable_enterprise_modules=True,  # masterDetail needs enterprise
+                allow_unsafe_jscode=True,        # for our JS callback
                 fit_columns_on_grid_load=True,
                 theme="material-dark",
-                key=f"aggrid_{bucket}"
+                key=bucket
             )
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
