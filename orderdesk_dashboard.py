@@ -5,18 +5,19 @@ import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2 import service_account
+import holidays  # pip install holidays
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
 # -----------------------------------------------------------------------------
-# 1. Share your Google Sheet with the service account email in your JSON key.
-# 2. Put your Base64-encoded JSON into a SECRET called GOOGLE_SERVICE_KEY_B64.
-# 3. Set SHEET_URL below to your sheet URL.
-# -----------------------------------------------------------------------------
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/edit?gid=1789939189"
+SHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/"
+    "edit?gid=1789939189"
+)
 RAW_TAB_NAME = "raw_orders"
 LOCAL_TZ = "America/Toronto"
-
+# -----------------------------------------------------------------------------
 
 def get_worksheet():
     b64 = os.getenv("GOOGLE_SERVICE_KEY_B64")
@@ -42,7 +43,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # cast types
+    # 1) Cast types
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -53,15 +54,26 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # normalize today/tomorrow as tz-naive to match Ship Date dtype
+    # 2) Figure out “today” and “tomorrow” in our Ontario business-day calendar
+    #    – Saturday (5), Sunday (6) and ON stat holidays are closed.
+    ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
-    tomorrow = today + pd.Timedelta(days=1)
 
-    # bucket logic
+    def next_open_day(date: pd.Timestamp) -> pd.Timestamp:
+        candidate = date + pd.Timedelta(days=1)
+        # skip weekends & ON holidays
+        while candidate.weekday() >= 5 or candidate in ca_holidays:
+            candidate += pd.Timedelta(days=1)
+        return candidate
+
+    tomorrow = next_open_day(today)
+
+    # 3) Bucket logic
     conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
-        (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
+        (df["Outstanding Qty"] > 0)
+        & (df["Quantity Fulfilled/Received"] > 0),
     ]
     choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
 
@@ -112,30 +124,33 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # 1) build summary (one row per order)
+        # Summary table: one row per order
         summary = (
-            sub
-            .groupby(["Document Number", "Name", "Ship Date"], as_index=False)
+            sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
             .agg({
                 "Outstanding Qty": "sum",
                 "Quantity Fulfilled/Received": "sum",
             })
-            .rename(columns={
-                "Document Number": "Order #",
-                "Name": "Customer",
-                "Ship Date": "Ship Date",
-                "Outstanding Qty": "Outstanding",
-                "Quantity Fulfilled/Received": "Shipped",
-            })
+            .rename(
+                columns={
+                    "Document Number": "Order #",
+                    "Name": "Customer",
+                    "Ship Date": "Ship Date",
+                    "Outstanding Qty": "Outstanding",
+                    "Quantity Fulfilled/Received": "Shipped",
+                }
+            )
             .sort_values("Ship Date")
         )
 
-        # 2) show the summary table
         tab.dataframe(summary, use_container_width=True)
 
-        # 3) pick one order to drill into
+        # Drill-down selector
         order_labels = summary.apply(
-            lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()})",
+            lambda r: (
+                f"Order {r['Order #']} — {r['Customer']} "
+                f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
+            ),
             axis=1,
         ).tolist()
 
@@ -150,7 +165,6 @@ def main():
             detail_rows = sub[sub["Document Number"] == order_no]
 
             with tab.expander("▶ Full line-item details", expanded=True):
-                # feel free to rename columns here
                 tab.table(
                     detail_rows[[
                         "Item",
