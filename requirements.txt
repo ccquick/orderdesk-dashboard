@@ -1,6 +1,6 @@
-streamlit>=1.0  
-streamlit-aggrid  
-holidays  
-gspread  
-google-auth  
-st-aggrid
+streamlit>=1.0
+streamlit-aggrid    # this is the PyPI package that gives you `from st_aggrid import AgGrid`
+holidays
+gspread
+google-auth
+pandas
