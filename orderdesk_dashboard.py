@@ -121,25 +121,40 @@ def main():
         "Partially Shipped": tab_partial,
     }
 
-    for bucket, tab in tab_map.items():
-        sub = df[df["Bucket"] == bucket]
-        if sub.empty:
-            tab.info(f"No {bucket.lower()} orders 🎉")
-        else:
-            tab.dataframe(
-                sub[
-                    [
-                        "Document Number",
-                        "Name",
-                        "Ship Date",
-                        "Outstanding Qty",
-                        "Quantity Fulfilled/Received",
-                        "Item",
-                        "Memo",
-                    ]
-                ].sort_values("Ship Date"),
-                use_container_width=True,
+for bucket, tab in tab_map.items():
+    sub = df[df["Bucket"] == bucket]
+    if sub.empty:
+        tab.info(f"No {bucket.lower()} orders 🎉")
+    else:
+        # --- GROUP LINES INTO ONE ROW / ORDER ---
+        agg = (
+            sub
+            .groupby(
+                ["Document Number", "Name", "Ship Date"],
+                as_index=False
             )
+            .agg({
+                "Outstanding Qty": "sum",
+                "Quantity Fulfilled/Received": "sum",
+                "Item": lambda items: "\n".join(items),
+                "Memo": lambda memos: "\n".join(memos),
+            })
+        )
+        # --- SHOW THE AGGREGATED TABLE ---
+        tab.dataframe(
+            agg[[
+                "Document Number",
+                "Name",
+                "Ship Date",
+                "Outstanding Qty",
+                "Quantity Fulfilled/Received",
+                "Item",
+                "Memo",
+            ]]
+            .sort_values("Ship Date"),
+            use_container_width=True,
+        )
+
 
     st.caption("Data auto‑refreshes hourly from NetSuite saved search ➜ Google Sheet ➜ Streamlit")
 
