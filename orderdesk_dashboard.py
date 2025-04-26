@@ -87,8 +87,22 @@ def main():
 
     # ─── KPIs ─────────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
-    c1.metric("Overdue", int((df["Bucket"] == "Overdue").sum() + (df["Status"] == "Pending Billing/Partially Fulfilled").sum()))
-    c2.metric("Due Tomorrow", int((df["Bucket"] == "Due Tomorrow").sum()))
+
+    # count distinct orders for each bucket
+    overdue_orders = set(
+        df.loc[
+            (df["Bucket"] == "Overdue") |
+            (df["Status"] == "Pending Billing/Partially Fulfilled"),
+            "Document Number"
+        ].unique()
+    )
+    due_tomorrow_count = df.loc[
+        df["Bucket"] == "Due Tomorrow",
+        "Document Number"
+    ].nunique()
+
+    c1.metric("Overdue", len(overdue_orders))
+    c2.metric("Due Tomorrow", int(due_tomorrow_count))
 
     # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -115,14 +129,20 @@ def main():
     for bucket, tab in tabs.items():
         sub = df[df["Bucket"] == bucket]
         if bucket == "Overdue":
-            sub = pd.concat([sub, df[df["Status"] == "Pending Billing/Partially Fulfilled"]], ignore_index=True)
+            sub = pd.concat(
+                [sub, df[df["Status"] == "Pending Billing/Partially Fulfilled"]],
+                ignore_index=True,
+            )
 
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
         summary = (
-            sub.groupby(["Document Number", "Name", "Ship Date", "Status"], as_index=False)
+            sub.groupby(
+                ["Document Number", "Name", "Ship Date", "Status"],
+                as_index=False,
+            )
             .agg({
                 "Outstanding Qty": "sum",
                 "Quantity Fulfilled/Received": "sum",
@@ -143,9 +163,12 @@ def main():
         )
 
         if bucket == "Overdue":
-            # only style overdue tab
             def _row_style(r):
-                color = "#fff3cd" if r["Status"] == "Pending Billing/Partially Fulfilled" else "#f8d7da"
+                color = (
+                    "#fff3cd"
+                    if r["Status"] == "Pending Billing/Partially Fulfilled"
+                    else "#f8d7da"
+                )
                 return [f"background-color: {color}"] * len(r)
 
             styler = (
@@ -155,7 +178,6 @@ def main():
             )
             tab.dataframe(styler, use_container_width=True)
         else:
-            # Due Tomorrow: no background color
             tab.dataframe(summary, use_container_width=True)
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
