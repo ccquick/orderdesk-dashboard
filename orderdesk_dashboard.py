@@ -29,7 +29,7 @@ def get_worksheet():
         st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
         st.stop()
 
-    info = json.loads(base64.b64decode(b64).decode("utf-8"))
+    info = json.loads(base64.b64decode(b64).decode())
     creds = service_account.Credentials.from_service_account_info(
         info,
         scopes=[
@@ -46,11 +46,11 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # If your new column is named "Type" rename it to "Item Type"
+    # if your new column is named "Type", rename it
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
-    # 1) Cast and compute
+    # 1) cast types & compute Outstanding
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -60,19 +60,19 @@ def load_data():
         df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # 2) Business days calendar (ON weekends + holidays)
+    # 2) business-day “tomorrow” in ON (skip weekends + holidays)
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
-    def next_open_day(d):
+    def next_open(d: pd.Timestamp) -> pd.Timestamp:
         n = d + pd.Timedelta(days=1)
         while n.weekday() >= 5 or n in ca_holidays:
             n += pd.Timedelta(days=1)
         return n
 
-    tomorrow = next_open_day(today)
+    tomorrow = next_open(today)
 
-    # 3) Bucket into Overdue / Due Tomorrow / Partially Shipped
+    # 3) bucket each row
     conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -80,8 +80,8 @@ def load_data():
     ]
     choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
     df["Bucket"] = pd.Series(pd.NA, index=df.index)
-    for cond, label in zip(conditions, choices):
-        df.loc[cond, "Bucket"] = label
+    for cond, lbl in zip(conditions, choices):
+        df.loc[cond, "Bucket"] = lbl
 
     return df
 
@@ -89,6 +89,7 @@ def load_data():
 def main():
     st.set_page_config(page_title="Orderdesk Dashboard", layout="wide")
     st.title("📦 Orderdesk Shipment Status Dashboard")
+
     df = load_data()
 
     # ─── KPIs & FILTERS ────────────────────────────────────────────────────────
@@ -98,11 +99,12 @@ def main():
 
     with st.sidebar:
         st.header("Filters")
-        customers = st.multiselect("Customer", sorted(df["Name"].unique()))
-        rush = st.checkbox("Rush orders only")
-    if customers:
-        df = df[df["Name"].isin(customers)]
-    if rush and "Rush Order" in df.columns:
+        custs = sorted(df["Name"].unique())
+        sel_cust = st.multiselect("Customer", custs)
+        rush_only = st.checkbox("Rush orders only")
+    if sel_cust:
+        df = df[df["Name"].isin(sel_cust)]
+    if rush_only and "Rush Order" in df.columns:
         df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
     # ─── TABS ─────────────────────────────────────────────────────────────────
@@ -113,7 +115,7 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # ‣ Build the summary table (one row per order)
+        # build summary table
         summary = (
             sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
             .agg({
@@ -130,34 +132,36 @@ def main():
             .sort_values("Ship Date")
         )
 
-        # <<< — **HERE’S THE FIX** — convert all Ship Date to plain strings:
+        # ――――――――――――――――――――――――――――――――――――――
+        # **FIX**: convert datetime → string so AgGrid accepts it
         summary["Ship Date"] = summary["Ship Date"].astype(str)
+        # ――――――――――――――――――――――――――――――――――――――
 
-        # ‣ Mark which orders have any outstanding BOM items
-        bom_set = set(
+        # flag any order with outstanding BOM lines
+        bom_orders = set(
             sub.loc[
                 (sub["Item Type"] == "Assembly/Bill of Materials") &
                 (sub["Outstanding Qty"] > 0),
                 "Document Number"
             ]
         )
-        summary["BOM Flag"] = summary["Order #"].apply(lambda o: "⚠️" if o in bom_set else "")
+        summary["BOM Flag"] = summary["Order #"].apply(lambda o: "⚠️" if o in bom_orders else "")
 
-        # ‣ Nest each order’s line-items under a “lineItems” key
+        # assemble master/detail payload
         records = []
-        for _, row in summary.iterrows():
-            d = row.to_dict()
-            details = sub[sub["Document Number"] == row["Order #"]]
-            d["lineItems"] = details[
+        for _, r in summary.iterrows():
+            rec = r.to_dict()
+            details = sub[sub["Document Number"] == r["Order #"]]
+            rec["lineItems"] = details[
                 ["Item", "Item Type", "Quantity", "Quantity Fulfilled/Received", "Outstanding Qty", "Memo"]
             ].rename(columns={
                 "Quantity": "Qty Ordered",
                 "Quantity Fulfilled/Received": "Qty Shipped",
                 "Outstanding Qty": "Outstanding",
             }).to_dict("records")
-            records.append(d)
+            records.append(rec)
 
-        # ─── Configure AgGrid for master/detail ───────────────────────────────
+        # build AgGrid options
         gb = GridOptionsBuilder.from_dataframe(summary.drop(columns=["BOM Flag"]))
         gb.configure_column("BOM Flag", header_name="BOM", width=80)
         gb.configure_grid_options(
@@ -180,12 +184,12 @@ def main():
         )
         grid_opts = gb.build()
 
-        tab.markdown("▶️ Click the ▸ arrow on the left to expand each order’s line-items")
+        tab.markdown("▶️ Click the arrow on the left to expand line-items")
         AgGrid(
             records,
             gridOptions=grid_opts,
-            fit_columns_on_grid_load=True,
             allow_unsafe_jscode=True,
+            fit_columns_on_grid_load=True,
         )
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
