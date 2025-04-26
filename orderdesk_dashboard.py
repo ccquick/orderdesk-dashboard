@@ -49,33 +49,39 @@ def get_worksheet():
     return sh.worksheet(RAW_TAB_NAME)
 
 
-def load_data():
-    ws = get_worksheet()
-    data = ws.get_all_records()
-    df = pd.DataFrame(data)
+ def load_data():
+     ws = get_worksheet()
+     data = ws.get_all_records()
+     df = pd.DataFrame(data)
 
-    # cast columns
-    df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
-    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
-    df["Quantity Fulfilled/Received"] = pd.to_numeric(
-        df["Quantity Fulfilled/Received"], errors="coerce"
-    )
-    df["Outstanding Qty"] = df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
+     # cast columns
+     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
+     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
+     df["Quantity Fulfilled/Received"] = pd.to_numeric(
+         df["Quantity Fulfilled/Received"], errors="coerce"
+     )
+     df["Outstanding Qty"] = df["Quantity"].fillna(0) - df[
+         "Quantity Fulfilled/Received"
+     ].fillna(0)
 
-    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize()
-    tomorrow = today + pd.Timedelta(days=1)
+-    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize()
++    # make today/tomorrow tz‐naive so it matches your Ship Date dtype
++    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
+     tomorrow = today + pd.Timedelta(days=1)
 
-    conditions = [
-        (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
-        (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
-        (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
-    ]
-    choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
-    df["Bucket"] = pd.Series(pd.NA, index=df.index)
-    for cond, label in zip(conditions, choices):
-        df.loc[cond, "Bucket"] = label
+     conditions = [
+         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
+         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
+         (df["Outstanding Qty"] > 0)
+         & (df["Quantity Fulfilled/Received"] > 0),
+     ]
+     choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
+     df["Bucket"] = pd.Series(pd.NA, index=df.index)
+     for cond, label in zip(conditions, choices):
+         df.loc[cond, "Bucket"] = label
 
-    return df
+     return df
+
 
 
 def main():
