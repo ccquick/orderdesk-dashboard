@@ -59,7 +59,7 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # business calendars
+    # Ontario business-day logic
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     def next_open_day(d):
@@ -69,7 +69,7 @@ def load_data():
         return c
     tomorrow = next_open_day(today)
 
-    # buckets
+    # bucket assignment
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -89,7 +89,7 @@ def main():
 
     df = load_data()
 
-    # ─── KPIs ─────────────────────────────────────────────────────────────────
+    # KPI counts by unique orders
     overdue_orders = df.loc[df["Bucket"]=="Overdue", "Document Number"].nunique()
     pbf_orders     = df.loc[df["Status"]=="Pending Billing/Partially Fulfilled", "Document Number"].nunique()
     due_orders     = df.loc[df["Bucket"]=="Due Tomorrow", "Document Number"].nunique()
@@ -98,7 +98,7 @@ def main():
     c1.metric("Overdue", int(overdue_orders + pbf_orders))
     c2.metric("Due Tomorrow", int(due_orders))
 
-    # ─── FILTERS ───────────────────────────────────────────────────────────────
+    # Sidebar filters
     with st.sidebar:
         st.header("Filters")
         customers = st.multiselect("Customer", sorted(df["Name"].unique()))
@@ -108,10 +108,11 @@ def main():
         if rush_only and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize()=="Yes"]
 
-    # ─── TABS ─────────────────────────────────────────────────────────────────
+    # Tabs
     tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
     tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
 
+    # Pre‐compute chemical (BOM) flag
     chem_orders = set(
         df.loc[
             (df["Item Type"]=="Assembly/Bill of Materials") &
@@ -132,6 +133,7 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
+        # roll up to one row per order
         summary = (
             sub.groupby(
                 ["Document Number","Name","Ship Date","Status"],
@@ -157,7 +159,7 @@ def main():
         )
 
         if bucket=="Overdue":
-            # style with hide_index on the Styler only
+            # color partially fulfilled yellow, others red
             def _row_style(r):
                 return [
                     "background-color: #fff3cd"
@@ -167,17 +169,15 @@ def main():
 
             styler = (
                 summary.style
-                       .hide_index()          # ← hide index here
                        .apply(_row_style, axis=1)
                        .set_properties(**{"text-align":"left"})
             )
-            tab.dataframe(styler, use_container_width=True)
+            tab.dataframe(styler, hide_index=True, use_container_width=True)
 
-        else:
-            # Due Tomorrow: just hide index via argument
+        else:  # Due Tomorrow
             tab.dataframe(summary, hide_index=True, use_container_width=True)
 
-        # ─── Drill-down dropdown
+        # drill-down dropdown
         labels = summary.apply(
             lambda r: (
                 f"Order {r['Order #']} — {r['Customer']} "
@@ -188,7 +188,7 @@ def main():
         sel = tab.selectbox(
             "Show line-items for…",
             ["— choose an order —"] + labels,
-            key=bucket
+            key=bucket,
         )
         if sel!="— choose an order —":
             order_no = int(sel.split()[1])
