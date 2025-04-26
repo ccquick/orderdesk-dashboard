@@ -3,6 +3,8 @@ import json
 import base64
 
 import pandas as pd
+pd.set_option("display.max_colwidth", None)
+
 import streamlit as st
 import gspread
 from google.oauth2 import service_account
@@ -25,7 +27,6 @@ def get_worksheet():
     if not b64:
         st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
         st.stop()
-
     info = json.loads(base64.b64decode(b64).decode("utf-8"))
     creds = service_account.Credentials.from_service_account_info(
         info,
@@ -43,11 +44,9 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # if your sheet named the new column "Type", rename it so the rest of the code can use "Item Type"
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
-    # 1) Cast core columns
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -58,30 +57,24 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # 2) Compute today & next Ontario business‐day
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
-
-    def next_open_day(date: pd.Timestamp) -> pd.Timestamp:
-        d = date + pd.Timedelta(days=1)
-        while d.weekday() >= 5 or d in ca_holidays:
-            d += pd.Timedelta(days=1)
-        return d
-
+    def next_open_day(d):
+        c = d + pd.Timedelta(1, "D")
+        while c.weekday() >= 5 or c in ca_holidays:
+            c += pd.Timedelta(1, "D")
+        return c
     tomorrow = next_open_day(today)
 
-    # 3) Bucket logic
-    conditions = [
+    conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
-        (df["Outstanding Qty"] > 0)
-        & (df["Quantity Fulfilled/Received"] > 0),
+        (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
     ]
-    choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
-
-    df["Bucket"] = pd.Series(pd.NA, index=df.index)
-    for cond, label in zip(conditions, choices):
-        df.loc[cond, "Bucket"] = label
+    labs = ["Overdue", "Due Tomorrow", "Partially Shipped"]
+    df["Bucket"] = pd.NA
+    for c, l in zip(conds, labs):
+        df.loc[c, "Bucket"] = l
 
     return df
 
@@ -92,29 +85,10 @@ def main():
 
     df = load_data()
 
-    # ─── KPIs (now counting UNIQUE orders) ────────────────────────────────────────
-    c1, c2, c3 = st.columns(3)
-
-    # treat "Pending Billing/Partially Fulfilled" as also overdue
-    overdue_set = set(
-        df.loc[
-            (df["Bucket"] == "Overdue")
-            | (df["Status"] == "Pending Billing/Partially Fulfilled"),
-            "Document Number",
-        ].unique()
-    )
-    due_tomorrow_count = df.loc[
-        df["Bucket"] == "Due Tomorrow",
-        "Document Number",
-    ].nunique()
-    partial_count = df.loc[
-        df["Bucket"] == "Partially Shipped",
-        "Document Number",
-    ].nunique()
-
-    c1.metric("Overdue", len(overdue_set))
-    c2.metric("Due Tomorrow", int(due_tomorrow_count))
-    c3.metric("Partially Shipped", int(partial_count))
+    # ─── KPIs ─────────────────────────────────────────────────────────────────
+    c1, c2 = st.columns(2)
+    c1.metric("Overdue", int((df["Bucket"] == "Overdue").sum() + (df["Status"] == "Pending Billing/Partially Fulfilled").sum()))
+    c2.metric("Due Tomorrow", int((df["Bucket"] == "Due Tomorrow").sum()))
 
     # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -127,27 +101,32 @@ def main():
             df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
     # ─── TABS ─────────────────────────────────────────────────────────────────
-    tab_overdue, tab_due_tomorrow, tab_partial = st.tabs(
-        ["Overdue", "Due Tomorrow", "Partially Shipped"]
-    )
-    tab_map = {
-        "Overdue": tab_overdue,
-        "Due Tomorrow": tab_due_tomorrow,
-        "Partially Shipped": tab_partial,
+    tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
+    tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
+
+    chem_orders = {
+        o for o in df.loc[
+            (df["Item Type"] == "Assembly/Bill of Materials") &
+            (df["Outstanding Qty"] > 0),
+            "Document Number"
+        ].unique()
     }
 
-    for bucket, tab in tab_map.items():
+    for bucket, tab in tabs.items():
         sub = df[df["Bucket"] == bucket]
+        if bucket == "Overdue":
+            sub = pd.concat([sub, df[df["Status"] == "Pending Billing/Partially Fulfilled"]], ignore_index=True)
+
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # Summary table (one row per order)
         summary = (
-            sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
+            sub.groupby(["Document Number", "Name", "Ship Date", "Status"], as_index=False)
             .agg({
                 "Outstanding Qty": "sum",
                 "Quantity Fulfilled/Received": "sum",
+                "Order Delay Comments": lambda x: "\n".join(x.dropna().unique()),
             })
             .rename(columns={
                 "Document Number": "Order #",
@@ -155,45 +134,29 @@ def main():
                 "Ship Date": "Ship Date",
                 "Outstanding Qty": "Outstanding",
                 "Quantity Fulfilled/Received": "Shipped",
+                "Order Delay Comments": "Delay Comments",
             })
             .sort_values("Ship Date")
         )
-        tab.dataframe(summary, use_container_width=True)
-
-        # Drill-down selector
-        labels = summary.apply(
-            lambda r: (
-                f"Order {r['Order #']} — {r['Customer']} "
-                f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
-            ),
-            axis=1,
-        ).tolist()
-
-        sel = tab.selectbox(
-            "Show line-items for…",
-            ["— choose an order —"] + labels,
-            key=bucket,
+        summary["Chemical Order Flag"] = summary["Order #"].apply(
+            lambda o: "⚠️" if o in chem_orders else ""
         )
-        if sel != "— choose an order —":
-            order_no = int(sel.split()[1])
-            detail = sub[sub["Document Number"] == order_no]
 
-            with tab.expander("▶ Full line-item details", expanded=True):
-                tab.table(
-                    detail[[
-                        "Item",
-                        "Item Type",
-                        "Quantity",
-                        "Quantity Fulfilled/Received",
-                        "Outstanding Qty",
-                        "Memo",
-                    ]]
-                    .rename(columns={
-                        "Quantity": "Qty Ordered",
-                        "Quantity Fulfilled/Received": "Qty Shipped",
-                        "Outstanding Qty": "Outstanding",
-                    })
-                )
+        if bucket == "Overdue":
+            # only style overdue tab
+            def _row_style(r):
+                color = "#fff3cd" if r["Status"] == "Pending Billing/Partially Fulfilled" else "#f8d7da"
+                return [f"background-color: {color}"] * len(r)
+
+            styler = (
+                summary.style
+                .apply(_row_style, axis=1)
+                .set_properties(**{"text-align": "left"})
+            )
+            tab.dataframe(styler, use_container_width=True)
+        else:
+            # Due Tomorrow: no background color
+            tab.dataframe(summary, use_container_width=True)
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
