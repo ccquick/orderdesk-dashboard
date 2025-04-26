@@ -64,9 +64,9 @@ def get_worksheet():
          "Quantity Fulfilled/Received"
      ].fillna(0)
 
--    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize()
-+    # make today/tomorrow tz‐naive so it matches your Ship Date dtype
-+    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
+    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize()
+    # make today/tomorrow tz‐naive so it matches your Ship Date dtype
+    today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
      tomorrow = today + pd.Timedelta(days=1)
 
      conditions = [
