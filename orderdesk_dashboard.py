@@ -77,6 +77,40 @@ def load_data():
         return c
     tomorrow = next_open_day(today)
 
+  from pandas.tseries.offsets import CustomBusinessDay
+
+    # 1) define your Ontario business‐day calendar
+    ca_bd = CustomBusinessDay(
+        weekmask="Mon Tue Wed Thu Fri",
+        holidays=list(holidays.CA(prov="ON").keys()),
+    )
+    
+    # 2) add a column to the raw df that, for any shipment date <= today,
+    #    counts the number of business days *past* the ship date
+    df["Days Overdue"] = (
+        (pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
+          - df["Ship Date"])
+        .apply(lambda delta: 
+            len(pd.date_range(
+                start=df["Ship Date"].dt.normalize(), 
+                end=today, 
+                freq=ca_bd
+            )) - 1  # subtract the ship‐day itself
+            if delta.days > 0 else 0
+        )
+    )
+    
+    # 3) then include it in your summary
+    summary = (
+        sub.groupby([...], as_index=False)
+           .agg({
+               "Order Delay Comments": ... ,
+               "Days Overdue": "max",   # take the max days‐late on any line
+           })
+           .rename({"Days Overdue": "Days Late"}, axis=1)
+           .sort_values("Ship Date")
+    )
+
     # assign buckets
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
