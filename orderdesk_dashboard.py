@@ -136,10 +136,14 @@ def main():
     tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
 
     for bucket, tab in tabs.items():
-        sub = df[df["Bucket"] == bucket]
         if bucket == "Overdue":
-            extra = df[df["Status"] == "Pending Billing/Partially Fulfilled"]
-            sub = pd.concat([sub, extra], ignore_index=True)
+            # include both overdue *and* pending-billing rows, but only once each
+            sub = df[
+                (df["Bucket"] == "Overdue")
+                | (df["Status"] == "Pending Billing/Partially Fulfilled")
+            ]
+        else:
+            sub = df[df["Bucket"] == bucket]
 
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
