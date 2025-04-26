@@ -1,12 +1,11 @@
 import os
 import json
 import base64
-import re
 import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2 import service_account
-import holidays  # make sure this is in your requirements.txt
+import holidays  # pip install holidays
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION
@@ -43,7 +42,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # rename "Type" → "Item Type" if needed
+    # rename “Type” → “Item Type” if needed
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
@@ -68,9 +67,19 @@ def load_data():
             d += pd.Timedelta(days=1)
         return d
 
-    tomorrow = next_open_day(today)
+    df.attrs["today"] = today
+    df.attrs["tomorrow"] = next_open_day(today)
+    return df
 
-    # bucket logic
+
+def main():
+    st.set_page_config(page_title="Orderdesk Dashboard", layout="wide")
+    st.title("📦 Orderdesk Shipment Status Dashboard")
+
+    df = load_data()
+    today, tomorrow = df.attrs["today"], df.attrs["tomorrow"]
+
+    # ─── Bucket logic ─────────────────────────────────────────────────────────
     conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -81,18 +90,9 @@ def load_data():
     for cond, label in zip(conditions, choices):
         df.loc[cond, "Bucket"] = label
 
-    return df
-
-
-def main():
-    st.set_page_config(page_title="Orderdesk Dashboard", layout="wide")
-    st.title("📦 Orderdesk Shipment Status Dashboard")
-
-    df = load_data()
-
     # ─── KPIs ────────────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
-    for col, label in zip((c1, c2, c3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
+    for col, label in zip((c1, c2, c3), choices):
         col.metric(label, int((df["Bucket"] == label).sum()))
 
     # ─── FILTERS ─────────────────────────────────────────────────────────────
@@ -100,14 +100,14 @@ def main():
         st.header("Filters")
         customers = st.multiselect("Customer", sorted(df["Name"].unique()))
         rush_only = st.checkbox("Rush orders only")
-        if customers:
-            df = df[df["Name"].isin(customers)]
-        if rush_only and "Rush Order" in df.columns:
-            df = df[df["Rush Order"].str.capitalize() == "Yes"]
+    if customers:
+        df = df[df["Name"].isin(customers)]
+    if rush_only and "Rush Order" in df.columns:
+        df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
     # ─── TABS ────────────────────────────────────────────────────────────────
-    tabs = st.tabs(["Overdue", "Due Tomorrow", "Partially Shipped"])
-    tab_map = dict(zip(["Overdue", "Due Tomorrow", "Partially Shipped"], tabs))
+    tabs = st.tabs(choices)
+    tab_map = dict(zip(choices, tabs))
 
     # precompute BOM orders
     bom_orders = set(
@@ -118,13 +118,23 @@ def main():
         ].unique()
     )
 
+    # precompute “Order Delay Comments” per order
+    if "Order Delay Comments" in df.columns:
+        comment_map = (
+            df.groupby("Document Number")["Order Delay Comments"]
+            .agg(lambda txts: "; ".join([t for t in txts.dropna().unique()]))
+            .to_dict()
+        )
+    else:
+        comment_map = {}
+
     for bucket, tab in tab_map.items():
         sub = df[df["Bucket"] == bucket]
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # build summary (one line per order)
+        # SUMMARY (one row per order)
         summary = (
             sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
             .agg({
@@ -140,13 +150,17 @@ def main():
             })
             .sort_values("Ship Date")
         )
-        summary["BOM Flag"] = summary["Order #"].apply(
+
+        # add our flags & comments
+        summary["Chemical Order Flag"] = summary["Order #"].apply(
             lambda o: "⚠️" if o in bom_orders else ""
         )
+        if bucket == "Overdue" and comment_map:
+            summary["Delay Comments"] = summary["Order #"].map(comment_map)
 
         tab.dataframe(summary, use_container_width=True)
 
-        # build label → order# map
+        # DRILLDOWN
         label_map = {}
         dropdown = ["— choose an order —"]
         for _, r in summary.iterrows():
@@ -161,7 +175,6 @@ def main():
         if sel != "— choose an order —":
             order_no = label_map[sel]
             detail = sub[sub["Document Number"] == order_no]
-
             with tab.expander("▶ Full line-item details", expanded=True):
                 tab.table(
                     detail[[
