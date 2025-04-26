@@ -208,18 +208,30 @@ def main():
             on = int(sel.split()[1])
             detail = sub[sub["Document Number"] == on]
             # dedupe items by item code
-            detail = detail.drop_duplicates(subset=['Item'])
+            # only show each Item once
+            detail = sub[sub["Document Number"] == on].drop_duplicates(subset="Item")
+            
+            # prepare display frame
+            display = detail[
+                ["Item", "Item Type", "Quantity", "Quantity Fulfilled/Received", "Outstanding Qty", "Memo"]
+            ].rename(columns={
+                "Quantity": "Qty Ordered",
+                "Quantity Fulfilled/Received": "Qty Shipped",
+                "Outstanding Qty": "Outstanding",
+            })
+            
+            # highlight any row where Outstanding > 0
+            def highlight_outstanding(row):
+                return ["background-color: #fff3cd" if row["Outstanding"] > 0 else "" for _ in row]
+            
+            styled = (
+                display.style
+                .apply(highlight_outstanding, axis=1)
+                .set_properties(**{"text-align": "left"})
+            )
+            
             with tab.expander("▶ Full line-item details", expanded=True):
-                detail_display = detail[
-                    [
-                        "Item", "Item Type", "Quantity",
-                        "Quantity Fulfilled/Received", "Outstanding Qty", "Memo",
-                    ]
-                ].rename(columns={
-                    "Quantity": "Qty Ordered",
-                    "Quantity Fulfilled/Received": "Qty Shipped",
-                    "Outstanding Qty": "Outstanding",
-                })
+                tab.dataframe(styled, use_container_width=True, hide_index=True)
                 # format numeric columns
                 for c in ['Qty Ordered','Qty Shipped','Outstanding']:
                     detail_display[c] = detail_display[c].apply(
