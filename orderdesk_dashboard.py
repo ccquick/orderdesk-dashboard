@@ -54,7 +54,7 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # 2) Ontario business-day calendar
+    # 2) Ontario business days: Mon–Fri minus stat holidays
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
@@ -74,15 +74,11 @@ def load_data():
         & (df["Quantity Fulfilled/Received"] > 0),
     ]
     choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
+
     df["Bucket"] = pd.Series(pd.NA, index=df.index)
     for cond, label in zip(conditions, choices):
         df.loc[cond, "Bucket"] = label
 
-    # 4) BOM flag per line
-    df["BOM Outstanding"] = (
-        (df["Outstanding Qty"] > 0)
-        & (df.get("Type", df.get("Item Type", None)) == "Assembly/Bill of Materials")
-    )
     return df
 
 
@@ -126,71 +122,74 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # Summary: one row per order + BOM flag
+        # Summary table: one row per order
         summary = (
-            sub.groupby(
-                ["Document Number", "Name", "Ship Date"], as_index=False
-            )
+            sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
             .agg({
                 "Outstanding Qty": "sum",
                 "Quantity Fulfilled/Received": "sum",
-                "BOM Outstanding": "any",
             })
             .rename(
                 columns={
                     "Document Number": "Order #",
                     "Name": "Customer",
+                    "Ship Date": "Ship Date",
                     "Outstanding Qty": "Outstanding",
                     "Quantity Fulfilled/Received": "Shipped",
-                    "BOM Outstanding": "BOM Flag",
                 }
             )
             .sort_values("Ship Date")
         )
-        # Convert BOM Flag to emoji
-        summary["BOM Flag"] = summary["BOM Flag"].map(lambda x: "⚠️" if x else "")
 
-        # Show summary
+        # BOM Flag: any outstanding Assembly/Bill of Materials
+        assembly_orders = sub.loc[
+            (sub.get("Type", sub.get("Item Type", "")) == "Assembly/Bill of Materials")
+            & (sub["Outstanding Qty"] > 0),
+            "Document Number"
+        ].unique()
+        summary["BOM Flag"] = summary["Order #"].apply(
+            lambda o: "⚠️" if o in assembly_orders else ""
+        )
+
         tab.dataframe(summary, use_container_width=True)
 
-        # Drill-down selector with BOM icon
+        # Drill-down selector
+        order_nos = summary["Order #"].tolist()
         order_labels = summary.apply(
             lambda r: (
-                f"{r['BOM Flag']} Order {r['Order #']} — {r['Customer']} "
+                f"{'⚠️ ' if r['BOM Flag']=='⚠️' else ''}"
+                f"Order {r['Order #']} — {r['Customer']} "
                 f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
             ),
             axis=1,
         ).tolist()
+        label_to_no = dict(zip(order_labels, order_nos))
 
         sel = tab.selectbox(
             "Show line-items for…",
-            ["(choose an order)"] + order_labels,
+            ["  (choose an order)"] + order_labels,
             key=bucket,
         )
 
-        if sel != "(choose an order)":
-            order_no = int(sel.split()[1])
+        if sel != "  (choose an order)":
+            order_no = label_to_no[sel]
             detail_rows = sub[sub["Document Number"] == order_no]
 
             with tab.expander("▶ Full line-item details", expanded=True):
-                detail_table = detail_rows[
-                    [
+                tab.table(
+                    detail_rows[[
                         "Item",
-                        "Type" if "Type" in detail_rows.columns else "Item Type",
+                        "Type",
                         "Quantity",
                         "Quantity Fulfilled/Received",
                         "Outstanding Qty",
                         "Memo",
-                    ]
-                ].rename(
-                    columns={
+                    ]].rename(columns={
                         "Type": "Item Type",
                         "Quantity": "Qty Ordered",
                         "Quantity Fulfilled/Received": "Qty Shipped",
-                        "Outstanding Qty": "Outstanding",
-                    }
+                    })
                 )
-                tab.table(detail_table)
 
     st.caption(
         "Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit"
