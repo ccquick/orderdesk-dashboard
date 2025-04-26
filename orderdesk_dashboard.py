@@ -6,7 +6,6 @@ import streamlit as st
 import gspread
 from google.oauth2 import service_account
 import holidays  # pip install holidays
-from st_aggrid import AgGrid, GridOptionsBuilder
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
@@ -55,26 +54,29 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # business-day "tomorrow"
+    # compute business “tomorrow” (skip Sat/Sun + ON holidays)
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
-    def next_open_day(d):
-        c = d + pd.Timedelta(days=1)
-        while c.weekday() >= 5 or c in ca_holidays:
-            c += pd.Timedelta(days=1)
-        return c
+
+    def next_open_day(d: pd.Timestamp) -> pd.Timestamp:
+        candidate = d + pd.Timedelta(days=1)
+        while candidate.weekday() >= 5 or candidate in ca_holidays:
+            candidate += pd.Timedelta(days=1)
+        return candidate
+
     tomorrow = next_open_day(today)
 
-    # bucket
-    conditions = [
+    # bucket logic
+    conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
-        (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
+        (df["Outstanding Qty"] > 0)
+        & (df["Quantity Fulfilled/Received"] > 0),
     ]
-    choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
+    labels = ["Overdue", "Due Tomorrow", "Partially Shipped"]
     df["Bucket"] = pd.Series(pd.NA, index=df.index)
-    for cond, label in zip(conditions, choices):
-        df.loc[cond, "Bucket"] = label
+    for c, l in zip(conds, labels):
+        df.loc[c, "Bucket"] = l
 
     return df
 
@@ -85,71 +87,85 @@ def main():
 
     df = load_data()
 
-    # KPIs
+    # ─── KPIs ─────────────────────────────────────────────────────────────────
     k1, k2, k3 = st.columns(3)
-    k1.metric("Overdue", int((df["Bucket"] == "Overdue").sum()))
-    k2.metric("Due Tomorrow", int((df["Bucket"] == "Due Tomorrow").sum()))
-    k3.metric("Partially Shipped", int((df["Bucket"] == "Partially Shipped").sum()))
+    for col, lab in zip((k1, k2, k3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
+        col.metric(lab, int((df["Bucket"] == lab).sum()))
 
-    # filters
+    # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
-        cust = st.multiselect("Customer", sorted(df["Name"].unique()), default=None)
-        rush = st.checkbox("Rush orders only")
-        if cust:
-            df = df[df["Name"].isin(cust)]
-        if rush and "Rush Order" in df.columns:
+        customers = st.multiselect("Customer", sorted(df["Name"].unique()), default=None)
+        rush_only  = st.checkbox("Rush orders only")
+        if customers:
+            df = df[df["Name"].isin(customers)]
+        if rush_only and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
-    # tabs
-    tab_over, tab_due, tab_part = st.tabs([
-        "Overdue", "Due Tomorrow", "Partially Shipped"
-    ])
-    for bucket, tab in zip(["Overdue","Due Tomorrow","Partially Shipped"],
-                           [tab_over,tab_due,tab_part]):
+    # ─── TABS ─────────────────────────────────────────────────────────────────
+    tab_over, tab_tom, tab_part = st.tabs(
+        ["Overdue", "Due Tomorrow", "Partially Shipped"]
+    )
+    tab_map = {"Overdue": tab_over, "Due Tomorrow": tab_tom, "Partially Shipped": tab_part}
+
+    for bucket, tab in tab_map.items():
         sub = df[df["Bucket"] == bucket]
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # AG-Grid grouping
-        gb = GridOptionsBuilder.from_dataframe(sub)
-        # group by Document Number
-        gb.configure_column("Document Number", rowGroup=True, hide=True)
-        # show first Ship Date & Name per group
-        gb.configure_column("Ship Date", aggFunc="first", headerName="Ship Date")
-        gb.configure_column("Name", aggFunc="first", headerName="Customer")
-        # aggregate qty columns
-        gb.configure_column("Outstanding Qty", aggFunc="sum", headerName="Outstanding")
-        gb.configure_column(
-            "Quantity Fulfilled/Received", aggFunc="sum", headerName="Shipped"
+        # 1) Summary table (one row per order)
+        summary = (
+            sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
+            .agg({
+                "Outstanding Qty": "sum",
+                "Quantity Fulfilled/Received": "sum",
+            })
+            .rename(columns={
+                "Document Number": "Order #",
+                "Name":            "Customer",
+                "Ship Date":       "Ship Date",
+                "Outstanding Qty": "Outstanding",
+                "Quantity Fulfilled/Received": "Shipped",
+            })
+            .sort_values("Ship Date")
         )
-        # detail columns
-        gb.configure_column("Item", headerName="Line Item")
-        gb.configure_column("Memo", headerName="Memo")
+        tab.dataframe(summary, use_container_width=True)
 
-        gb.configure_grid_options(
-            groupDefaultExpanded=0,  # start collapsed
-            autoGroupColumnDef={
-                "headerName":"Order #",
-                "cellRendererParams": {"suppressCount": True}
-            },
-            defaultColDef={"flex":1, "sortable":True, "filter":True},
-        )
-        grid_opts = gb.build()
+        # 2) Drill-down selector
+        order_labels = summary.apply(
+            lambda r: (
+                f"Order {r['Order #']} — {r['Customer']} "
+                f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
+            ),
+            axis=1,
+        ).tolist()
 
-        tab.markdown(
-            "Click the ▸ to expand each order's line-items"
+        sel = tab.selectbox(
+            "Show line-items for…",
+            ["  (choose an order)"] + order_labels,
+            key=bucket,
         )
-        AgGrid(
-            sub,
-            gridOptions=grid_opts,
-            theme="material-dark",
-            fit_columns_on_grid_load=True,
-            enable_enterprise_modules=False,
-        )
+
+        if sel != "  (choose an order)":
+            order_no = int(sel.split()[1])
+            detail_rows = sub[sub["Document Number"] == order_no]
+
+            with tab.expander("▶ Full line-item details", expanded=True):
+                tab.table(
+                    detail_rows[[
+                        "Item",
+                        "Quantity",
+                        "Quantity Fulfilled/Received",
+                        "Memo",
+                    ]].rename(columns={
+                        "Quantity":                    "Qty Ordered",
+                        "Quantity Fulfilled/Received": "Qty Shipped",
+                    })
+                )
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
+
 
 if __name__ == "__main__":
     main()
