@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 from google.oauth2 import service_account
 import gspread
+import json
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
@@ -25,13 +26,27 @@ LOCAL_TZ = "America/Toronto"
 # -----------------------------------------------------------------------------
 
 def get_worksheet():
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_KEY_JSON,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
+    key_or_path = SERVICE_KEY_JSON
+
+    # If the env-var starts with “{” it’s the JSON itself; else it’s a path.
+    if key_or_path and key_or_path.strip().startswith("{"):
+        info = json.loads(key_or_path)
+        creds = service_account.Credentials.from_service_account_info(
+            info,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive.readonly",
+            ],
+        )
+    else:
+        creds = service_account.Credentials.from_service_account_file(
+            key_or_path,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive.readonly",
+            ],
+        )
+
     client = gspread.authorize(creds)
     sh = client.open_by_url(SHEET_URL)
     return sh.worksheet(RAW_TAB_NAME)
