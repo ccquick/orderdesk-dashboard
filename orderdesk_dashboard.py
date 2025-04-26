@@ -77,7 +77,7 @@ def load_data():
         return c
     tomorrow = next_open_day(today)
 
-  from pandas.tseries.offsets import CustomBusinessDay
+    from pandas.tseries.offsets import CustomBusinessDay
 
     # 1) define your Ontario business‐day calendar
     ca_bd = CustomBusinessDay(
