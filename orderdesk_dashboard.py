@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import base64
@@ -237,4 +236,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
