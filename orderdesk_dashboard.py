@@ -24,11 +24,12 @@ LOCAL_TZ = "America/Toronto"
 # -----------------------------------------------------------------------------
 
 def get_worksheet():
-    # Load service account creds and open sheet/tab
+    # Load and decode service account credentials from environment
     b64 = os.getenv("GOOGLE_SERVICE_KEY_B64")
     if not b64:
         st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
         st.stop()
+
     info = json.loads(base64.b64decode(b64).decode("utf-8"))
     creds = service_account.Credentials.from_service_account_info(
         info,
@@ -42,15 +43,16 @@ def get_worksheet():
 
 
 def load_data():
-    # Fetch and normalize raw CSV into DataFrame
+    # Fetch raw sheet and build DataFrame
     ws = get_worksheet()
-    df = pd.DataFrame(ws.get_all_records())
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
 
-    # Rename if needed
+    # Normalize column names
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
-    # Cast and compute outstanding
+    # Cast types
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -61,7 +63,7 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # Business-day calendar for Ontario
+    # Ontario business-day calendar
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     bd = CustomBusinessDay(
@@ -69,7 +71,7 @@ def load_data():
         holidays=list(ca_holidays.keys()),
     )
 
-    # Compute next open day for "Due Tomorrow"
+    # Next open day calculation (for Due Tomorrow)
     def next_open_day(d):
         c = d + pd.Timedelta(days=1)
         while c.weekday() >= 5 or c in ca_holidays:
@@ -77,28 +79,28 @@ def load_data():
         return c
     tomorrow = next_open_day(today)
 
-    # Assign buckets
+    # Bucket orders
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
-        (df["Outstanding Qty"] > 0)
-        & (df["Quantity Fulfilled/Received"] > 0),
+        (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
     ]
     labs = ["Overdue", "Due Tomorrow", "Partially Shipped"]
     df["Bucket"] = pd.NA
     for c, l in zip(conds, labs):
         df.loc[c, "Bucket"] = l
 
-    # Days overdue (business days)
+    # Calculate business-day "Days Overdue" per row
     def calc_days_overdue(ship_dt):
         if pd.isna(ship_dt) or ship_dt >= today:
             return 0
-        drange = pd.date_range(
+        brange = pd.date_range(
             start=ship_dt.normalize(),
             end=today - pd.Timedelta(days=1),
             freq=bd,
         )
-        return len(drange)
+        return len(brange)
+
     df["Days Overdue"] = df["Ship Date"].apply(calc_days_overdue)
 
     return df
@@ -110,18 +112,19 @@ def main():
 
     df = load_data()
 
-    # KPI counts by unique order #
+    # ─── KPIs ─────────────────────────────────────────────────────────────────
     overdue_orders = df.loc[
         (df["Bucket"] == "Overdue")
-        | (df["Status"] == "Pending Billing/Partially Fulfilled"),
+        | (df.get("Status", "") == "Pending Billing/Partially Fulfilled"),
         "Document Number"
     ].nunique()
     due_orders = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
+
     c1, c2 = st.columns(2)
     c1.metric("Overdue", int(overdue_orders))
     c2.metric("Due Tomorrow", int(due_orders))
 
-    # Filters
+    # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
         customers = st.multiselect("Customer", sorted(df["Name"].unique()))
@@ -131,21 +134,30 @@ def main():
         if rush_only and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
-    # Tabs
+    # ─── TABS ─────────────────────────────────────────────────────────────────
     tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
     tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
+
+    # Chemical flag orders
+    chem_orders = set(
+        df.loc[
+            (df.get("Item Type", "") == "Assembly/Bill of Materials")
+            & (df["Outstanding Qty"] > 0),
+            "Document Number",
+        ].unique()
+    )
 
     for bucket, tab in tabs.items():
         sub = df[df["Bucket"] == bucket]
         if bucket == "Overdue":
-            extra = df[df["Status"] == "Pending Billing/Partially Fulfilled"]
+            extra = df[df.get("Status", "") == "Pending Billing/Partially Fulfilled"]
             sub = pd.concat([sub, extra], ignore_index=True)
 
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # build summary
+        # build summary per unique order
         summary = (
             sub.groupby(
                 ["Document Number", "Name", "Ship Date", "Status"],
@@ -164,65 +176,66 @@ def main():
             })
             .sort_values("Ship Date")
         )
-
-        # flag only if any outstanding BOM lines exist
-        def has_active_bom(o):
-            mask = (
-                (sub["Document Number"] == o)
-                & (sub["Item Type"] == "Assembly/Bill of Materials")
-                & (sub["Outstanding Qty"] > 0)
-            )
-            return mask.any()
         summary["Chemical Order Flag"] = summary["Order #"].apply(
-            lambda o: "⚠️" if has_active_bom(o) else ""
+            lambda o: "⚠️" if o in chem_orders else ""
         )
 
-        # choose display columns
-        cols = [
-            "Order #", "Customer", "Ship Date", "Status",
-            "Delay Comments", "Chemical Order Flag",
+        display_cols = [
+            "Order #",
+            "Customer",
+            "Ship Date",
+            "Status",
+            "Delay Comments",
+            "Chemical Order Flag",
         ]
         if bucket == "Overdue":
-            cols.append("Days Late")
+            display_cols.append("Days Late")
 
-        # style
-        if bucket == "Overdue":
-            def row_color(r):
+            def _row_style(r):
                 bg = (
                     "#fff3cd"
                     if r["Status"] == "Pending Billing/Partially Fulfilled"
                     else "#f8d7da"
                 )
                 return [f"background-color: {bg}"] * len(r)
+
             styler = (
-                summary[cols]
+                summary[display_cols]
                 .style
-                .apply(row_color, axis=1)
+                .apply(_row_style, axis=1)
                 .set_properties(**{"text-align": "left"})
             )
             tab.dataframe(styler, use_container_width=True, hide_index=True)
         else:
-            tab.dataframe(summary[cols], use_container_width=True, hide_index=True)
+            tab.dataframe(summary[display_cols], use_container_width=True, hide_index=True)
 
-        # drill-down
+        # drill-down selector
         order_labels = summary.apply(
             lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()})",
             axis=1,
         ).tolist()
+
         sel = tab.selectbox(
             "Show line-items for…",
             ["— choose an order —"] + order_labels,
             key=bucket,
         )
         if sel != "— choose an order —":
-            on = int(sel.split()[1])
-            detail = sub[sub["Document Number"] == on]
+            order_no = int(sel.split()[1])
+            # grab and de-duplicate line-items
+            detail = df[df["Document Number"] == order_no].drop_duplicates(
+                subset=["Item", "Item Type", "Quantity", "Quantity Fulfilled/Received", "Memo"]
+            )
             with tab.expander("▶ Full line-item details", expanded=True):
                 tab.table(
                     detail[
                         [
-                            "Item", "Item Type", "Quantity",
-                            "Quantity Fulfilled/Received", "Outstanding Qty", "Memo",
+                            "Item",
+                            "Item Type",
+                            "Quantity",
+                            "Quantity Fulfilled/Received",
+                            "Outstanding Qty",
+                            "Memo",
                         ]
                     ].rename(columns={
                         "Quantity": "Qty Ordered",
