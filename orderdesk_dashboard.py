@@ -46,22 +46,21 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # rename your new "Type" column to "Item Type"
+    # If your new column is named "Type" rename it to "Item Type"
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
-    # core casts
+    # 1) Cast and compute
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
         df["Quantity Fulfilled/Received"], errors="coerce"
     )
     df["Outstanding Qty"] = (
-        df["Quantity"].fillna(0)
-        - df["Quantity Fulfilled/Received"].fillna(0)
+        df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # business calendar
+    # 2) Business days calendar (ON weekends + holidays)
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
@@ -73,17 +72,16 @@ def load_data():
 
     tomorrow = next_open_day(today)
 
-    # bucket
+    # 3) Bucket into Overdue / Due Tomorrow / Partially Shipped
     conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
-        (df["Outstanding Qty"] > 0)
-        & (df["Quantity Fulfilled/Received"] > 0),
+        (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
     ]
     choices = ["Overdue", "Due Tomorrow", "Partially Shipped"]
     df["Bucket"] = pd.Series(pd.NA, index=df.index)
-    for cond, lab in zip(conditions, choices):
-        df.loc[cond, "Bucket"] = lab
+    for cond, label in zip(conditions, choices):
+        df.loc[cond, "Bucket"] = label
 
     return df
 
@@ -93,17 +91,17 @@ def main():
     st.title("📦 Orderdesk Shipment Status Dashboard")
     df = load_data()
 
-    # ─── KPIs & Filters ────────────────────────────────────────────────────────
+    # ─── KPIs & FILTERS ────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
-    for col, lab in zip((c1, c2, c3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
-        col.metric(lab, int((df["Bucket"] == lab).sum()))
+    for col, lbl in zip((c1, c2, c3), ["Overdue", "Due Tomorrow", "Partially Shipped"]):
+        col.metric(lbl, int((df["Bucket"] == lbl).sum()))
 
     with st.sidebar:
         st.header("Filters")
-        custs = st.multiselect("Customer", sorted(df["Name"].unique()))
+        customers = st.multiselect("Customer", sorted(df["Name"].unique()))
         rush = st.checkbox("Rush orders only")
-    if custs:
-        df = df[df["Name"].isin(custs)]
+    if customers:
+        df = df[df["Name"].isin(customers)]
     if rush and "Rush Order" in df.columns:
         df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
@@ -115,10 +113,13 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # build summary + attach each order's line-items
+        # ‣ Build the summary table (one row per order)
         summary = (
             sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
-            .agg({"Outstanding Qty": "sum", "Quantity Fulfilled/Received": "sum"})
+            .agg({
+                "Outstanding Qty": "sum",
+                "Quantity Fulfilled/Received": "sum",
+            })
             .rename(columns={
                 "Document Number": "Order #",
                 "Name": "Customer",
@@ -128,31 +129,35 @@ def main():
             })
             .sort_values("Ship Date")
         )
-        # flag BOM orders
+
+        # <<< — **HERE’S THE FIX** — convert all Ship Date to plain strings:
+        summary["Ship Date"] = summary["Ship Date"].astype(str)
+
+        # ‣ Mark which orders have any outstanding BOM items
         bom_set = set(
             sub.loc[
-                (sub["Item Type"] == "Assembly/Bill of Materials")
-                & (sub["Outstanding Qty"] > 0),
-                "Document Number",
+                (sub["Item Type"] == "Assembly/Bill of Materials") &
+                (sub["Outstanding Qty"] > 0),
+                "Document Number"
             ]
         )
         summary["BOM Flag"] = summary["Order #"].apply(lambda o: "⚠️" if o in bom_set else "")
 
-        # nest details
+        # ‣ Nest each order’s line-items under a “lineItems” key
         records = []
         for _, row in summary.iterrows():
-            rec = row.to_dict()
+            d = row.to_dict()
             details = sub[sub["Document Number"] == row["Order #"]]
-            rec["lineItems"] = details[
+            d["lineItems"] = details[
                 ["Item", "Item Type", "Quantity", "Quantity Fulfilled/Received", "Outstanding Qty", "Memo"]
             ].rename(columns={
                 "Quantity": "Qty Ordered",
                 "Quantity Fulfilled/Received": "Qty Shipped",
                 "Outstanding Qty": "Outstanding",
             }).to_dict("records")
-            records.append(rec)
+            records.append(d)
 
-        # build AgGrid options
+        # ─── Configure AgGrid for master/detail ───────────────────────────────
         gb = GridOptionsBuilder.from_dataframe(summary.drop(columns=["BOM Flag"]))
         gb.configure_column("BOM Flag", header_name="BOM", width=80)
         gb.configure_grid_options(
@@ -160,15 +165,14 @@ def main():
             detailCellRendererParams={
                 "detailGridOptions": {
                     "columnDefs": [
-                        {"field": "Item", "headerName": "Item", "minWidth": 200},
-                        {"field": "Item Type", "headerName": "Type", "minWidth": 180},
+                        {"field": "Item", "minWidth": 200},
+                        {"field": "Item Type", "minWidth": 180},
                         {"field": "Qty Ordered"},
                         {"field": "Qty Shipped"},
                         {"field": "Outstanding"},
                         {"field": "Memo", "minWidth": 250},
                     ]
                 },
-                # JS callback to pull the nested lineItems list
                 "getDetailRowData": JsCode(
                     "function(params) { params.successCallback(params.data.lineItems); }"
                 ),
@@ -176,13 +180,12 @@ def main():
         )
         grid_opts = gb.build()
 
-        tab.markdown("▶️ Click the arrow at left to expand each order’s line-items")
+        tab.markdown("▶️ Click the ▸ arrow on the left to expand each order’s line-items")
         AgGrid(
             records,
             gridOptions=grid_opts,
             fit_columns_on_grid_load=True,
-            enable_enterprise_modules=False,
-            allow_unsafe_jscode=True,  # <-- needed for our getDetailRowData JS
+            allow_unsafe_jscode=True,
         )
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
