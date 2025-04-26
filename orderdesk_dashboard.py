@@ -37,8 +37,6 @@ def get_worksheet():
         ],
     )
     client = gspread.authorize(creds)
-
-    # ← back to using open_by_url so it matches what you had before
     sh = client.open_by_url(SHEET_URL)
     return sh.worksheet(RAW_TAB_NAME)
 
@@ -91,13 +89,14 @@ def main():
 
     # ─── KPIs ─────────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
-    # count only documents, not line-items
     overdue_orders = df.loc[df["Bucket"] == "Overdue", "Document Number"].nunique()
-    partially = df.loc[df["Status"] == "Pending Billing/Partially Fulfilled", "Document Number"].nunique()
-    due_orders    = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
+    partial_orders = df.loc[
+        df["Status"] == "Pending Billing/Partially Fulfilled", "Document Number"
+    ].nunique()
+    due_orders = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
 
-    c1.metric("Overdue", overdue_orders + partially)
-    c2.metric("Due Tomorrow", due_orders)
+    c1.metric("Overdue", int(overdue_orders + partial_orders))
+    c2.metric("Due Tomorrow", int(due_orders))
 
     # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -135,7 +134,10 @@ def main():
             continue
 
         summary = (
-            sub.groupby(["Document Number", "Name", "Ship Date", "Status"], as_index=False)
+            sub.groupby(
+                ["Document Number", "Name", "Ship Date", "Status"],
+                as_index=False
+            )
             .agg({
                 "Quantity": "sum",
                 "Quantity Fulfilled/Received": "sum",
@@ -158,20 +160,24 @@ def main():
         if bucket == "Overdue":
             def _row_style(r):
                 return [
-                    "background-color: #fff3cd" if r["Status"] == "Pending Billing/Partially Fulfilled"
+                    "background-color: #fff3cd"
+                    if r["Status"] == "Pending Billing/Partially Fulfilled"
                     else "background-color: #f8d7da"
                 ] * len(r)
 
             styler = (
-                summary.style
+                summary
+                .style
+                .hide_index()                # ← hide that first column
                 .apply(_row_style, axis=1)
                 .set_properties(**{"text-align": "left"})
             )
             tab.dataframe(styler, use_container_width=True)
         else:
-            tab.dataframe(summary, use_container_width=True)
+            styler = summary.style.hide_index()  # ← and here too
+            tab.dataframe(styler, use_container_width=True)
 
-        # — restore the drill-down selectbox & expander —
+        # restore the drill-down below
         labels = summary.apply(
             lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()})",
             axis=1,
