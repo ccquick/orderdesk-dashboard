@@ -45,7 +45,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # rename any stray "Type" → "Item Type"
+    # rename stray "Type" → "Item Type"
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
@@ -59,11 +59,11 @@ def load_data():
         df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # Ontario business‐day
+    # Ontario biz‐day calc
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
-    def next_open_day(d: pd.Timestamp) -> pd.Timestamp:
+    def next_open_day(d):
         c = d + pd.Timedelta(days=1)
         while c.weekday() >= 5 or c in ca_holidays:
             c += pd.Timedelta(days=1)
@@ -91,16 +91,16 @@ def main():
 
     df = load_data()
 
-    # KPI = count of *orders*, not lines
-    overdue_orders = df.loc[df["Bucket"] == "Overdue", "Document Number"].nunique()
-    partial_orders = df.loc[
+    # KPI = distinct orders
+    overdue_cnt = df.loc[df["Bucket"] == "Overdue", "Document Number"].nunique()
+    partial_cnt = df.loc[
         df["Status"] == "Pending Billing/Partially Fulfilled", "Document Number"
     ].nunique()
-    due_orders = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
+    due_cnt = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
 
     c1, c2 = st.columns(2)
-    c1.metric("Overdue", int(overdue_orders + partial_orders))
-    c2.metric("Due Tomorrow", int(due_orders))
+    c1.metric("Overdue", int(overdue_cnt + partial_cnt))
+    c2.metric("Due Tomorrow", int(due_cnt))
 
     # filters
     with st.sidebar:
@@ -116,7 +116,7 @@ def main():
     tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
     tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
 
-    # chemical‐order flag
+    # chemical‐order flag set
     chem_orders = set(
         df.loc[
             (df["Item Type"] == "Assembly/Bill of Materials")
@@ -164,25 +164,26 @@ def main():
             lambda o: "⚠️" if o in chem_orders else ""
         )
 
-        # ← the one change: use hide(axis="index") here
-        styler = summary.style.hide(axis="index")
-
+        # style overdue tab rows
         if bucket == "Overdue":
-            def _row_style(r):
-                color = (
-                    "#fff3cd"
-                    if r["Status"] == "Pending Billing/Partially Fulfilled"
-                    else "#f8d7da"
-                )
-                return [f"background-color: {color}"] * len(r)
-            styler = styler.apply(_row_style, axis=1).set_properties(
-                **{"text-align": "left"}
-            )
+            def _style(r):
+                return [
+                    (
+                        "#fff3cd"
+                        if r["Status"] == "Pending Billing/Partially Fulfilled"
+                        else "#f8d7da"
+                    )
+                    for _ in r
+                ]
+            styler = summary.style.apply(
+                _style, axis=1
+            ).set_properties(**{"text-align": "left"})
+            # drop index with hide_index=True:
+            tab.dataframe(styler, hide_index=True, use_container_width=True)
+        else:
+            tab.dataframe(summary, hide_index=True, use_container_width=True)
 
-        # and render via write(), not dataframe()
-        tab.write(styler, use_container_width=True)
-
-        # add your drill-down dropdown back
+        # drill-down dropdown
         labels = summary.apply(
             lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()})",
             axis=1,
