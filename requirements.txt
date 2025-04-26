@@ -1,7 +1,6 @@
-streamlit>=1.0
+streamlit>=1.33.0
+pandas
 gspread
 google-auth
 holidays
-pandas
 streamlit-aggrid
-st-aggrid
