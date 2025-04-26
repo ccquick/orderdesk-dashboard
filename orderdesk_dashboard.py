@@ -45,7 +45,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # lump in your "Type" → "Item Type" rename if needed
+    # rename any stray "Type" → "Item Type"
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
@@ -59,24 +59,23 @@ def load_data():
         df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # Ontario business-day logic
+    # Ontario business‐day
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
     def next_open_day(d: pd.Timestamp) -> pd.Timestamp:
-        c = d + pd.Timedelta(1, "D")
+        c = d + pd.Timedelta(days=1)
         while c.weekday() >= 5 or c in ca_holidays:
-            c += pd.Timedelta(1, "D")
+            c += pd.Timedelta(days=1)
         return c
 
     tomorrow = next_open_day(today)
 
-    # bucket it
+    # bucket
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
-        (df["Outstanding Qty"] > 0)
-        & (df["Quantity Fulfilled/Received"] > 0),
+        (df["Outstanding Qty"] > 0) & (df["Quantity Fulfilled/Received"] > 0),
     ]
     labs = ["Overdue", "Due Tomorrow", "Partially Shipped"]
     df["Bucket"] = pd.NA
@@ -92,11 +91,10 @@ def main():
 
     df = load_data()
 
-    # KPI counts must be distinct orders, not line items
+    # KPI = count of *orders*, not lines
     overdue_orders = df.loc[df["Bucket"] == "Overdue", "Document Number"].nunique()
     partial_orders = df.loc[
-        df["Status"] == "Pending Billing/Partially Fulfilled",
-        "Document Number",
+        df["Status"] == "Pending Billing/Partially Fulfilled", "Document Number"
     ].nunique()
     due_orders = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
 
@@ -104,7 +102,7 @@ def main():
     c1.metric("Overdue", int(overdue_orders + partial_orders))
     c2.metric("Due Tomorrow", int(due_orders))
 
-    # sidebar filters
+    # filters
     with st.sidebar:
         st.header("Filters")
         customers = st.multiselect("Customer", sorted(df["Name"].unique()))
@@ -118,7 +116,7 @@ def main():
     tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
     tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
 
-    # precompute your chemical-order flag
+    # chemical‐order flag
     chem_orders = set(
         df.loc[
             (df["Item Type"] == "Assembly/Bill of Materials")
@@ -130,7 +128,6 @@ def main():
     for bucket, tab in tabs.items():
         sub = df[df["Bucket"] == bucket]
         if bucket == "Overdue":
-            # tack on the partials into that tab
             sub = pd.concat(
                 [sub, df[df["Status"] == "Pending Billing/Partially Fulfilled"]],
                 ignore_index=True,
@@ -167,8 +164,8 @@ def main():
             lambda o: "⚠️" if o in chem_orders else ""
         )
 
-        # style it, hide that first index column
-        styler = summary.style.hide_index()
+        # ← the one change: use hide(axis="index") here
+        styler = summary.style.hide(axis="index")
 
         if bucket == "Overdue":
             def _row_style(r):
@@ -178,20 +175,18 @@ def main():
                     else "#f8d7da"
                 )
                 return [f"background-color: {color}"] * len(r)
-
             styler = styler.apply(_row_style, axis=1).set_properties(
                 **{"text-align": "left"}
             )
 
-        # **<-- here we switch to .write(styler) so hide_index() actually takes effect**
+        # and render via write(), not dataframe()
         tab.write(styler, use_container_width=True)
 
-        # drill-down dropdown
+        # add your drill-down dropdown back
         labels = summary.apply(
             lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date'].date()})",
             axis=1,
         ).tolist()
-
         sel = tab.selectbox(
             "Show line-items for…", ["— choose an order —"] + labels, key=bucket
         )
