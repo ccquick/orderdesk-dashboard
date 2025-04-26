@@ -103,17 +103,17 @@ def main():
     )
     due_count = int((df["Bucket"] == "Due Tomorrow").sum())
 # ─── KPIs ─────────────────────────────────────────────────────────────────
-c1, c2 = st.columns(2)
-
-# count unique overdue orders (including partials)
-overdue_orders = set(df.loc[df["Bucket"] == "Overdue", "Document Number"])
-partial_orders = set(df.loc[df["Status"] == "Pending Billing/Partially Fulfilled", "Document Number"])
-overdue_count = len(overdue_orders.union(partial_orders))
-c1.metric("Overdue", overdue_count)
-
-# count unique due‐tomorrow orders
-due_tomorrow_count = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
-c2.metric("Due Tomorrow", due_tomorrow_count)
+    c1, c2 = st.columns(2)
+    
+    # count unique overdue orders (including partials)
+    overdue_orders = set(df.loc[df["Bucket"] == "Overdue", "Document Number"])
+    partial_orders = set(df.loc[df["Status"] == "Pending Billing/Partially Fulfilled", "Document Number"])
+    overdue_count = len(overdue_orders.union(partial_orders))
+    c1.metric("Overdue", overdue_count)
+    
+    # count unique due‐tomorrow orders
+    due_tomorrow_count = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
+    c2.metric("Due Tomorrow", due_tomorrow_count)
 
     # ─── FILTERS ──────────────────────────────────────────────────────
     with st.sidebar:
