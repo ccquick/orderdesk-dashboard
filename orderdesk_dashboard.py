@@ -9,7 +9,14 @@ from google.oauth2 import service_account
 # -----------------------------------------------------------------------------
 # CONFIGURATION (edit just this block)
 # -----------------------------------------------------------------------------
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/edit?gid=1789939189"  # 👈 your sheet link
+# 1. Share your Google Sheet (the one the Apps Script fills) with the
+#    service account email in your JSON key.
+# 2. Add the Base64‑encoded JSON key to Streamlit secrets under
+#    GOOGLE_SERVICE_KEY_B64 (without newlines).
+# 3. Set SHEET_URL below to your sheet URL.
+# -----------------------------------------------------------------------------
+
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/edit"
 RAW_TAB_NAME = "raw_orders"
 LOCAL_TZ = "America/Toronto"
 
@@ -22,7 +29,6 @@ def get_worksheet():
     if not b64:
         st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
         st.stop()
-
     info = json.loads(base64.b64decode(b64).decode("utf-8"))
     creds = service_account.Credentials.from_service_account_info(
         info,
@@ -31,10 +37,9 @@ def get_worksheet():
             "https://www.googleapis.com/auth/drive.readonly",
         ],
     )
-
     client = gspread.authorize(creds)
-    sh = client.open_by_url(SHEET_URL)
-    return sh.worksheet(RAW_TAB_NAME)
+    sheet = client.open_by_url(SHEET_URL)
+    return sheet.worksheet(RAW_TAB_NAME)
 
 
 def load_data():
@@ -44,20 +49,16 @@ def load_data():
 
     # cast types
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce").dt.tz_localize(None)
-    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0).astype(int)
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
         df["Quantity Fulfilled/Received"], errors="coerce"
-    )
-    df["Outstanding Qty"] = (
-        df["Quantity"].fillna(0)
-        - df["Quantity Fulfilled/Received"].fillna(0)
-    )
+    ).fillna(0).astype(int)
+    df["Outstanding Qty"] = df["Quantity"] - df["Quantity Fulfilled/Received"]
 
-    # compute today/tomorrow
+    # dates for bucketing
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     tomorrow = today + pd.Timedelta(days=1)
 
-    # bucket
     conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -76,63 +77,63 @@ def main():
     st.title("📦 Orderdesk Shipment Status Dashboard")
 
     df = load_data()
-    # metrics
-    kpi_cols = st.columns(3)
-    for col, label in zip(kpi_cols, ["Overdue", "Due Tomorrow", "Partially Shipped"]):
-        count = int((df["Bucket"] == label).sum())
-        col.metric(label, f"{count}")
+
+    # KPI metrics
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Overdue", int((df["Bucket"] == "Overdue").sum()))
+    k2.metric("Due Tomorrow", int((df["Bucket"] == "Due Tomorrow").sum()))
+    k3.metric("Partially Shipped", int((df["Bucket"] == "Partially Shipped").sum()))
 
     # sidebar filters
     with st.sidebar:
         st.header("Filters")
-        customers = st.multiselect(
-            "Customer", sorted(df["Name"].unique()), default=None
-        )
-        rush_only = st.checkbox("Rush orders only")
+        customers = st.multiselect("Customer", sorted(df["Name"].unique()), default=None)
+        rush = st.checkbox("Rush orders only")
         if customers:
             df = df[df["Name"].isin(customers)]
-        if rush_only and "Rush Order" in df.columns:
-            df = df[df["Rush Order"].str.capitalize() == "Yes"]
+        if rush and "Rush Order" in df.columns:
+            df = df[df["Rush Order"].str.lower() == "yes"]
 
-    # tabs
+    # tabs by bucket
     tabs = st.tabs(["Overdue", "Due Tomorrow", "Partially Shipped"])
-    tab_map = dict(zip(["Overdue", "Due Tomorrow", "Partially Shipped"], tabs))
-
-    for bucket, tab in tab_map.items():
-        sub = df[df["Bucket"] == bucket]
+    for bucket, tab in zip(["Overdue", "Due Tomorrow", "Partially Shipped"], tabs):
         with tab:
-            if sub.empty:
+            subset = df[df["Bucket"] == bucket]
+            if subset.empty:
                 st.info(f"No {bucket.lower()} orders 🎉")
                 continue
 
-            # summary table
+            # summary + expanders inline
+            # group to unique orders
             summary = (
-                sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
+                subset
+                .groupby(["Document Number","Name","Ship Date"], as_index=False)
                 .agg({
                     "Outstanding Qty": "sum",
                     "Quantity Fulfilled/Received": "sum",
                 })
-            )
-            st.dataframe(
-                summary.sort_values("Ship Date"),
-                use_container_width=True,
+                .sort_values("Ship Date")
+                .reset_index(drop=True)
             )
 
-            # line‐item expanders
-            for _, order in summary.iterrows():
-                order_no = order["Document Number"]
-                cust = order["Name"]
-                ship_dt = pd.to_datetime(order["Ship Date"]).date()
-                label = f"Order {order_no} — {cust} ({ship_dt})"
-                with st.expander(label, expanded=False):
-                    lines = sub[sub["Document Number"] == order_no][
-                        ["Quantity", "Item", "Memo"]
-                    ]
-                    st.dataframe(lines, use_container_width=True)
+            for _, row in summary.iterrows():
+                doc = row["Document Number"]
+                name = row["Name"]
+                date = row["Ship Date"].strftime("%Y-%m-%d")
+                outq = int(row["Outstanding Qty"])
+                recq = int(row["Quantity Fulfilled/Received"])
+                label = f"Order {doc} — {name} ({date}) | Outstanding: {outq} / {recq}"
 
-    st.caption(
-        "Data auto‑refreshes hourly from NetSuite saved search ➜ Google Sheet ➜ Streamlit"
-    )
+                with st.expander(label):
+                    lines = subset[subset["Document Number"] == doc]
+                    st.dataframe(
+                        lines[["Quantity","Item","Memo"]]
+                        .reset_index(drop=True),
+                        use_container_width=True
+                    )
+
+    st.caption("Data auto‑refreshes hourly from NetSuite → Google Sheet → Streamlit")
+
 
 if __name__ == "__main__":
     main()
