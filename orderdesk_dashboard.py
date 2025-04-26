@@ -17,7 +17,7 @@ SHEET_URL = (
 )
 RAW_TAB_NAME = "raw_orders"
 LOCAL_TZ = "America/Toronto"
-
+# -----------------------------------------------------------------------------
 
 def get_worksheet():
     b64 = os.getenv("GOOGLE_SERVICE_KEY_B64")
@@ -34,8 +34,7 @@ def get_worksheet():
         ],
     )
     client = gspread.authorize(creds)
-    sh = client.open_by_url(SHEET_URL)
-    return sh.worksheet(RAW_TAB_NAME)
+    return client.open_by_url(SHEET_URL).worksheet(RAW_TAB_NAME)
 
 
 def load_data():
@@ -43,11 +42,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # --- clean headers and rename Document Number to Order # ---
-    df.columns = df.columns.str.strip()
-    df.rename(columns={"Document Number": "Order #"}, inplace=True)
-
-    # --- cast types ---
+    # 1) Cast types
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -58,7 +53,7 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # --- business-day "tomorrow" logic for Ontario ---
+    # 2) Compute today & next business‐day (ON weekends+stat‐holidays off)
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
 
@@ -70,7 +65,7 @@ def load_data():
 
     tomorrow = next_open_day(today)
 
-    # --- bucket logic ---
+    # 3) Bucket logic
     conditions = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -111,8 +106,23 @@ def main():
             df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
     # ─── TABS ─────────────────────────────────────────────────────────────────
-    tabs = st.tabs(labels=["Overdue", "Due Tomorrow", "Partially Shipped"])
-    tab_map = dict(zip(["Overdue", "Due Tomorrow", "Partially Shipped"], tabs))
+    tab_overdue, tab_due_tomorrow, tab_partial = st.tabs(
+        ["Overdue", "Due Tomorrow", "Partially Shipped"]
+    )
+    tab_map = {
+        "Overdue": tab_overdue,
+        "Due Tomorrow": tab_due_tomorrow,
+        "Partially Shipped": tab_partial,
+    }
+
+    # Precompute which orders have an outstanding BOM line
+    bom_orders = set(
+        df.loc[
+            (df["Item Type"] == "Assembly/Bill of Materials") &
+            (df["Outstanding Qty"] > 0),
+            "Document Number",
+        ].unique()
+    )
 
     for bucket, tab in tab_map.items():
         sub = df[df["Bucket"] == bucket]
@@ -120,16 +130,16 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # Summary table (one row per order)
+        # ── Summary table: one row per order ───────────────────────────────
         summary = (
-            sub.groupby(["Order #", "Name", "Ship Date"], as_index=False)
+            sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
             .agg({
                 "Outstanding Qty": "sum",
                 "Quantity Fulfilled/Received": "sum",
             })
             .rename(
                 columns={
-                    "Order #": "Order #",
+                    "Document Number": "Order #",
                     "Name": "Customer",
                     "Ship Date": "Ship Date",
                     "Outstanding Qty": "Outstanding",
@@ -139,16 +149,14 @@ def main():
             .sort_values("Ship Date")
         )
 
-        # BOM Flag for Assembly/Bill of Materials
-        def has_bom(order_no):
-            detail = sub[sub["Order #"] == order_no]
-            return detail["Item Type"].eq("Assembly/Bill of Materials").any()
-
-        summary["BOM Flag"] = summary["Order #"].apply(lambda o: "⚠️" if has_bom(o) else "")
+        # add BOM-flag icon
+        summary["BOM Flag"] = summary["Order #"].apply(
+            lambda o: "⚠️" if o in bom_orders else ""
+        )
 
         tab.dataframe(summary, use_container_width=True)
 
-        # Drill-down selector
+        # ── Drill-down selector ──────────────────────────────────────────────
         order_labels = summary.apply(
             lambda r: (
                 f"Order {r['Order #']} — {r['Customer']} "
@@ -159,13 +167,13 @@ def main():
 
         sel = tab.selectbox(
             "Show line-items for…",
-            ["  (choose an order)"] + order_labels,
+            ["— choose an order —"] + order_labels,
             key=bucket,
         )
 
-        if sel != "  (choose an order)":
-            ord_no = int(sel.split()[1])
-            detail_rows = sub[sub["Order #"] == ord_no]
+        if sel != "— choose an order —":
+            order_no = int(sel.split()[1])
+            detail_rows = sub[sub["Document Number"] == order_no]
 
             with tab.expander("▶ Full line-item details", expanded=True):
                 tab.table(
