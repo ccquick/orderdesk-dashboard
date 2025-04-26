@@ -64,6 +64,7 @@ def load_data():
 def main():
     st.set_page_config(page_title="Orderdesk Dashboard", layout="wide")
     st.title("📦 Orderdesk Shipment Status Dashboard")
+
     df = load_data()
 
     # KPI metrics
@@ -86,7 +87,11 @@ def main():
 
     # Tabs per bucket
     tab_overdue, tab_due, tab_part = st.tabs(["Overdue", "Due Tomorrow", "Partially Shipped"])
-    tab_map = {"Overdue": tab_overdue, "Due Tomorrow": tab_due, "Partially Shipped": tab_part}
+    tab_map = {
+        "Overdue": tab_overdue,
+        "Due Tomorrow": tab_due,
+        "Partially Shipped": tab_part,
+    }
 
     for bucket, tab in tab_map.items():
         sub = df[df["Bucket"] == bucket]
@@ -94,7 +99,7 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # Aggregate to one row per order
+        # Aggregate one row per order
         agg = (
             sub.groupby(["Document Number", "Name", "Ship Date"], as_index=False)
             .agg({
@@ -103,15 +108,15 @@ def main():
             })
         )
 
-        # For each order, show an expander with line-level details
+        # Display each order in an expander with line items inside
         for _, order in agg.sort_values("Ship Date").iterrows():
             header = (
                 f"📄 {order['Document Number']}  •  {order['Name']}  •  "
                 f"{order['Ship Date'].date()}  •  Outstanding: {order['Outstanding Qty']}"
             )
             with tab.expander(header, expanded=False):
-                lines = sub[sub['Document Number'] == order['Document Number']][
-                    ['Quantity', 'Item', 'Memo']
+                lines = sub[sub["Document Number"] == order["Document Number"]][
+                    ["Quantity", "Item", "Memo"]
                 ]
                 tab.dataframe(lines.reset_index(drop=True), use_container_width=True)
 
