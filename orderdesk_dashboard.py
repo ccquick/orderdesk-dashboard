@@ -27,7 +27,6 @@ def get_worksheet():
     if not b64:
         st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
         st.stop()
-
     info = json.loads(base64.b64decode(b64).decode("utf-8"))
     creds = service_account.Credentials.from_service_account_info(
         info,
@@ -45,7 +44,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # unify your item-type column
+    # unify column name
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
@@ -56,10 +55,11 @@ def load_data():
         df["Quantity Fulfilled/Received"], errors="coerce"
     )
     df["Outstanding Qty"] = (
-        df["Quantity"].fillna(0) - df["Quantity Fulfilled/Received"].fillna(0)
+        df["Quantity"].fillna(0)
+        - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # biz-day logic for Ontario
+    # Ontario biz-day
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     def next_open_day(d):
@@ -89,18 +89,16 @@ def main():
 
     df = load_data()
 
-    # ─── KPIs ─────────────────────────────────────────────────
-    c1, c2 = st.columns(2)
-    # count unique orders, not line-items:
+    # ─── KPIs ─────────────────────────────────────────────────────────────────
     overdue_orders = df.loc[df["Bucket"]=="Overdue", "Document Number"].nunique()
-    # plus any pending-billing partials:
     pbf_orders     = df.loc[df["Status"]=="Pending Billing/Partially Fulfilled", "Document Number"].nunique()
     due_orders     = df.loc[df["Bucket"]=="Due Tomorrow", "Document Number"].nunique()
 
+    c1, c2 = st.columns(2)
     c1.metric("Overdue", int(overdue_orders + pbf_orders))
     c2.metric("Due Tomorrow", int(due_orders))
 
-    # ─── FILTERS ───────────────────────────────────────────────
+    # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
         customers = st.multiselect("Customer", sorted(df["Name"].unique()))
@@ -110,11 +108,10 @@ def main():
         if rush_only and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize()=="Yes"]
 
-    # ─── TABS ───────────────────────────────────────────────────
+    # ─── TABS ─────────────────────────────────────────────────────────────────
     tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
     tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
 
-    # precompute chemical‐order flag set
     chem_orders = set(
         df.loc[
             (df["Item Type"]=="Assembly/Bill of Materials") &
@@ -126,7 +123,6 @@ def main():
     for bucket, tab in tabs.items():
         sub = df[df["Bucket"]==bucket]
         if bucket=="Overdue":
-            # bring in the Partial-Fulfilled ones here too
             sub = pd.concat([
                 sub,
                 df[df["Status"]=="Pending Billing/Partially Fulfilled"]
@@ -136,7 +132,6 @@ def main():
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # build summary (one row per order)
         summary = (
             sub.groupby(
                 ["Document Number","Name","Ship Date","Status"],
@@ -161,24 +156,25 @@ def main():
             lambda o: "⚠️" if o in chem_orders else ""
         )
 
-        # render
         if bucket=="Overdue":
+            # style overdue tab
             def _row_style(r):
-                color = (
-                    "#fff3cd"
+                return [
+                    "background-color: #fff3cd"
                     if r["Status"]=="Pending Billing/Partially Fulfilled"
-                    else "#f8d7da"
-                )
-                return [f"background-color: {color}"]*len(r)
+                    else "background-color: #f8d7da"
+                ] * len(r)
 
             styler = (
                 summary.style
-                       .hide_index()          # <- hide that first column here
+                       .hide_index()          # ← **hide the index here**!
                        .apply(_row_style, axis=1)
                        .set_properties(**{"text-align":"left"})
             )
             tab.dataframe(styler, use_container_width=True)
+
         else:
+            # Due Tomorrow: just hide index on the DF directly
             tab.dataframe(summary, hide_index=True, use_container_width=True)
 
         # drill-down dropdown
@@ -186,8 +182,7 @@ def main():
             lambda r: (
                 f"Order {r['Order #']} — {r['Customer']} "
                 f"({r['Ship Date'].date()}) | Out: {r['Outstanding']}"
-            ),
-            axis=1
+            ), axis=1
         ).tolist()
 
         sel = tab.selectbox(
@@ -203,12 +198,12 @@ def main():
                     detail[[
                         "Item","Item Type",
                         "Quantity","Quantity Fulfilled/Received",
-                        "Outstanding Qty","Delay Comments"
+                        "Outstanding Qty","Order Delay Comments"
                     ]].rename(columns={
                         "Quantity":"Qty Ordered",
                         "Quantity Fulfilled/Received":"Qty Shipped",
                         "Outstanding Qty":"Outstanding",
-                        "Delay Comments":"Delay Comments"
+                        "Order Delay Comments":"Delay Comments"
                     })
                 )
 
