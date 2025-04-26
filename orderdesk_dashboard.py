@@ -137,11 +137,11 @@ def main():
 
     for bucket, tab in tabs.items():
         if bucket == "Overdue":
-            # include both overdue *and* pending-billing rows, but only once each
+            # include both overdue and pending-billing rows
             sub = df[
                 (df["Bucket"] == "Overdue")
                 | (df["Status"] == "Pending Billing/Partially Fulfilled")
-            ]
+            ].drop_duplicates(subset=["Document Number", "Item"], keep='last')
         else:
             sub = df[df["Bucket"] == bucket]
 
@@ -189,7 +189,7 @@ def main():
         if bucket == "Overdue":
             cols.append("Days Late")
 
-        # style
+        # style & format
         if bucket == "Overdue":
             def row_color(r):
                 bg = (
@@ -202,6 +202,7 @@ def main():
                 summary[cols]
                 .style
                 .apply(row_color, axis=1)
+                .format({"Days Late": "{:g}"})
                 .set_properties(**{"text-align": "left"})
             )
             tab.dataframe(styler, use_container_width=True, hide_index=True)
@@ -221,19 +222,24 @@ def main():
         if sel != "— choose an order —":
             on = int(sel.split()[1])
             detail = sub[sub["Document Number"] == on]
+            detail = detail.drop_duplicates(subset=["Item"], keep='last')
+            detail_fmt = detail.rename(
+                columns={
+                    "Quantity": "Qty Ordered",
+                    "Quantity Fulfilled/Received": "Qty Shipped",
+                    "Outstanding Qty": "Outstanding",
+                }
+            )
+            detail_styler = (
+                detail_fmt.style
+                .format({
+                    "Qty Ordered": "{:g}",
+                    "Qty Shipped": "{:g}",
+                    "Outstanding": "{:g}",
+                })
+            )
             with tab.expander("▶ Full line-item details", expanded=True):
-                tab.table(
-                    detail[
-                        [
-                            "Item", "Item Type", "Quantity",
-                            "Quantity Fulfilled/Received", "Outstanding Qty", "Memo",
-                        ]
-                    ].rename(columns={
-                        "Quantity": "Qty Ordered",
-                        "Quantity Fulfilled/Received": "Qty Shipped",
-                        "Outstanding Qty": "Outstanding",
-                    })
-                )
+                tab.dataframe(detail_styler, use_container_width=True, hide_index=True)
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
