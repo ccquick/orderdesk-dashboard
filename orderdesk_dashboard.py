@@ -15,7 +15,7 @@ import holidays  # pip install holidays
 # -----------------------------------------------------------------------------
 SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
-    "1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ/"
+    "1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYx7oOJDtPQ/"
     "edit?gid=1789939189"
 )
 RAW_TAB_NAME = "raw_orders"
@@ -44,7 +44,7 @@ def load_data():
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
-    # rename if necessary
+    # rename “Type” → “Item Type” if needed
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
@@ -59,7 +59,7 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
-    # business‐day logic
+    # business-day logic
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     def next_open_day(d):
@@ -91,19 +91,16 @@ def main():
 
     # ─── KPIs ─────────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
-    overdue_orders = set(
+    overdue_set = set(
         df.loc[
             (df["Bucket"] == "Overdue") |
             (df["Status"] == "Pending Billing/Partially Fulfilled"),
             "Document Number"
         ].unique()
     )
-    due_tomorrow_count = df.loc[
-        df["Bucket"] == "Due Tomorrow",
-        "Document Number"
-    ].nunique()
-    c1.metric("Overdue", len(overdue_orders))
-    c2.metric("Due Tomorrow", int(due_tomorrow_count))
+    due_tom_count = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
+    c1.metric("Overdue", len(overdue_set))
+    c2.metric("Due Tomorrow", int(due_tom_count))
 
     # ─── FILTERS ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -130,17 +127,16 @@ def main():
     for bucket, tab in tabs.items():
         sub = df[df["Bucket"] == bucket]
         if bucket == "Overdue":
-            # include partially-shipped under “Overdue”
-            sub = pd.concat(
-                [sub, df[df["Status"] == "Pending Billing/Partially Fulfilled"]],
-                ignore_index=True,
-            )
+            sub = pd.concat([
+                sub,
+                df[df["Status"] == "Pending Billing/Partially Fulfilled"]
+            ], ignore_index=True)
 
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
-        # build the one-row‐per‐order summary
+        # build the summary
         summary = (
             sub.groupby(
                 ["Document Number", "Name", "Ship Date", "Status"],
@@ -165,11 +161,10 @@ def main():
             lambda o: "⚠️" if o in chem_orders else ""
         )
 
-        # drop the “Outstanding” column and hide the index
-        display = summary.drop(columns=["Outstanding"])
+        # drop “Outstanding” & reset index so first column is Order #
+        display = summary.drop(columns=["Outstanding"]).reset_index(drop=True)
 
         if bucket == "Overdue":
-            # color-style only the Overdue tab
             def _row_style(r):
                 return [
                     "background-color: #fff3cd"
@@ -179,16 +174,14 @@ def main():
 
             styler = (
                 display.style
-                .hide_index()
                 .apply(_row_style, axis=1)
                 .set_properties(**{"text-align": "left"})
             )
             tab.dataframe(styler, use_container_width=True)
         else:
-            # Due Tomorrow: just show it cleanly
-            tab.dataframe(display.style.hide_index(), use_container_width=True)
+            tab.dataframe(display, use_container_width=True)
 
-        # ─── DRILL‐DOWN ───────────────────────────────────────────────────────────
+        # ─── DRILL-DOWN ───────────────────────────────────────────────────────────
         labels = summary.apply(
             lambda r: (
                 f"Order {r['Order #']} — {r['Customer']} "
