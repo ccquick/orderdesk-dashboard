@@ -225,7 +225,14 @@ def main():
                     detail_display[c] = detail_display[c].apply(
                         lambda x: int(x) if float(x).is_integer() else x
                     )
-                tab.table(detail_display)
+            
+                # highlight any outstanding line (Outstanding > 0) in light yellow
+                def _highlight(row):
+                    return ["background-color: #fff3cd" if row["Outstanding"] > 0 else "" for _ in row]
+            
+                styled = detail_display.style.apply(_highlight, axis=1).set_properties(**{"text-align": "left"})
+                tab.dataframe(styled, use_container_width=True, hide_index=True)
+
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
