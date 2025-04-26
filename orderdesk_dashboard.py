@@ -49,7 +49,7 @@ def get_worksheet():
     return sh.worksheet(RAW_TAB_NAME)
 
 
- def load_data():
+def load_data():
      ws = get_worksheet()
      data = ws.get_all_records()
      df = pd.DataFrame(data)
@@ -67,7 +67,7 @@ def get_worksheet():
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize()
     # make today/tomorrow tz‐naive so it matches your Ship Date dtype
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
-     tomorrow = today + pd.Timedelta(days=1)
+    tomorrow = today + pd.Timedelta(days=1)
 
      conditions = [
          (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
