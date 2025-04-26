@@ -13,13 +13,14 @@ import holidays  # pip install holidays
 # -----------------------------------------------------------------------------
 # CONFIGURATION
 # -----------------------------------------------------------------------------
-SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYx7oOJDtPQ"
-    ""
-)
+# -----------------------------------------------------------------------------
+# CONFIGURATION
+# -----------------------------------------------------------------------------
+# Use your spreadsheet's ID only (no "/edit" or query params)
+SHEET_ID = "1-Jkuwl9e1FBY6le08_KA3k7v9J3kfDvSYxw7oOJDtPQ"
 RAW_TAB_NAME = "raw_orders"
 LOCAL_TZ = "America/Toronto"
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
 def get_worksheet():
