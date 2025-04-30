@@ -23,6 +23,9 @@ RAW_TAB_NAME = "raw_orders"
 LOCAL_TZ = "America/Toronto"
 # -----------------------------------------------------------------------------
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA ACCESS
+# ─────────────────────────────────────────────────────────────────────────────
 def get_worksheet():
     b64 = os.getenv("GOOGLE_SERVICE_KEY_B64")
     if not b64:
@@ -41,12 +44,15 @@ def get_worksheet():
 
 
 def load_data():
+    """Read Google Sheet → tidy types → add helper columns."""
     ws = get_worksheet()
     df = pd.DataFrame(ws.get_all_records())
 
+    # column-name harmonisation (older search called it “Type”)
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
+    # ── basic typing ────────────────────────────────────────────
     df["Ship Date"] = pd.to_datetime(df["Ship Date"], errors="coerce")
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df["Quantity Fulfilled/Received"] = pd.to_numeric(
@@ -57,6 +63,7 @@ def load_data():
         - df["Quantity Fulfilled/Received"].fillna(0)
     )
 
+    # ── business-day helpers ───────────────────────────────────
     ca_holidays = holidays.CA(prov="ON")
     today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
     bd = CustomBusinessDay(
@@ -71,6 +78,7 @@ def load_data():
         return c
     tomorrow = next_open_day(today)
 
+    # ── bucket calculation (Overdue / Due Tomorrow / Partially Shipped) ──
     conds = [
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] <= today),
         (df["Outstanding Qty"] > 0) & (df["Ship Date"] == tomorrow),
@@ -82,6 +90,7 @@ def load_data():
     for c, l in zip(conds, labs):
         df.loc[c, "Bucket"] = l
 
+    # ── “Days Overdue” helper (business-day count) ─────────────
     def calc_days_overdue(ship_dt):
         if pd.isna(ship_dt) or ship_dt >= today:
             return 0
@@ -93,25 +102,44 @@ def load_data():
         return len(drange)
     df["Days Overdue"] = df["Ship Date"].apply(calc_days_overdue)
 
+    # ── NEW: flag drop-shipments (any non-blank Purchase Order) ───────────
+    po_col = (
+        "Purchase Order"
+        if "Purchase Order" in df.columns
+        else None
+    )
+    if po_col:
+        df["Is Drop Ship"] = df[po_col].astype(str).str.strip().ne("")
+    else:
+        df["Is Drop Ship"] = False
+
     return df
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#   STREAMLIT APP
+# ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Orderdesk Dashboard", layout="wide")
     st.title("📦 Orderdesk Shipment Status Dashboard")
 
     df = load_data()
 
+    # ── KPI cards ───────────────────────────────────────────────
     overdue_orders = df.loc[
         (df["Bucket"] == "Overdue")
         | (df["Status"] == "Pending Billing/Partially Fulfilled"),
         "Document Number"
     ].nunique()
     due_orders = df.loc[df["Bucket"] == "Due Tomorrow", "Document Number"].nunique()
-    c1, c2 = st.columns(2)
+    drop_orders = df.loc[df["Is Drop Ship"], "Document Number"].nunique()
+
+    c1, c2, c3 = st.columns(3)
     c1.metric("Overdue", int(overdue_orders))
     c2.metric("Due Tomorrow", int(due_orders))
+    c3.metric("Drop Shipments", int(drop_orders))
 
+    # ── sidebar filters ─────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
         customers = st.multiselect("Customer", sorted(df["Name"].unique()))
@@ -121,22 +149,37 @@ def main():
         if rush_only and "Rush Order" in df.columns:
             df = df[df["Rush Order"].str.capitalize() == "Yes"]
 
-    tab_overdue, tab_due = st.tabs(["Overdue", "Due Tomorrow"])
-    tabs = {"Overdue": tab_overdue, "Due Tomorrow": tab_due}
+    # ── TABS ───────────────────────────────────────────────────
+    tab_overdue, tab_due, tab_drop = st.tabs(
+        ["Overdue", "Due Tomorrow", "Drop Shipments"]
+    )
+    tabs = {
+        "Overdue": tab_overdue,
+        "Due Tomorrow": tab_due,
+        "Drop Shipments": tab_drop,
+    }
 
     for bucket, tab in tabs.items():
+        # ------------------------------------------------------------------
+        # Slice the dataframe for this tab
+        # ------------------------------------------------------------------
         if bucket == "Overdue":
             sub = df[
                 (df["Bucket"] == "Overdue")
                 | (df["Status"] == "Pending Billing/Partially Fulfilled")
             ]
-        else:
-            sub = df[df["Bucket"] == bucket]
+        elif bucket == "Due Tomorrow":
+            sub = df[df["Bucket"] == "Due Tomorrow"]
+        else:  # Drop Shipments
+            sub = df[df["Is Drop Ship"]]
 
         if sub.empty:
             tab.info(f"No {bucket.lower()} orders 🎉")
             continue
 
+        # ------------------------------------------------------------------
+        # Build order-level summary table
+        # ------------------------------------------------------------------
         summary = (
             sub.groupby(
                 ["Document Number", "Name", "Ship Date", "Status"],
@@ -159,6 +202,7 @@ def main():
         # remove time component
         summary["Ship Date"] = summary["Ship Date"].dt.date
 
+        # ⚠️ Chemical order flag
         def has_active_bom(o):
             mask = (
                 (sub["Document Number"] == o)
@@ -177,26 +221,44 @@ def main():
         if bucket == "Overdue":
             cols.append("Days Late")
 
-        if bucket == "Overdue":
-            def row_color(r):
+        # ------------------------------------------------------------------
+        # Display the summary with conditional colouring
+        # ------------------------------------------------------------------
+        def row_color(r):
+            if bucket == "Overdue":
                 bg = (
                     "#fff3cd"
                     if r["Status"] == "Pending Billing/Partially Fulfilled"
                     else "#f8d7da"
                 )
-                return [f"background-color: {bg}"] * len(r)
-            styler = (
-                summary[cols]
-                .style
-                .apply(row_color, axis=1)
-                .set_properties(**{"text-align": "left"})
-            )
-            tab.dataframe(styler, use_container_width=True, hide_index=True)
-        else:
-            tab.dataframe(summary[cols], use_container_width=True, hide_index=True)
+            elif bucket == "Drop Shipments":
+                # Same palette as “Overdue” by request
+                bg = (
+                    "#fff3cd"
+                    if r["Status"] == "Pending Billing/Partially Fulfilled"
+                    else "#f8d7da"
+                )
+            else:
+                bg = "#ffffff"
+            return [f"background-color: {bg}"] * len(r)
 
+        styler = (
+            summary[cols]
+            .style
+            .apply(row_color, axis=1)
+            .set_properties(**{"text-align": "left"})
+        )
+        tab.dataframe(
+            styler,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ------------------------------------------------------------------
+        # Line-item drill-down
+        # ------------------------------------------------------------------
         order_labels = summary.apply(
-            lambda	r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date']})",
+            lambda r: f"Order {r['Order #']} — {r['Customer']} ({r['Ship Date']})",
             axis=1,
         ).tolist()
         sel = tab.selectbox(
@@ -220,19 +282,21 @@ def main():
                     "Quantity Fulfilled/Received": "Qty Shipped",
                     "Outstanding Qty": "Outstanding",
                 })
-                # format numeric columns
-                for c in ['Qty Ordered','Qty Shipped','Outstanding']:
+                for c in ['Qty Ordered', 'Qty Shipped', 'Outstanding']:
                     detail_display[c] = detail_display[c].apply(
                         lambda x: int(x) if float(x).is_integer() else x
                     )
-            
-                # highlight any outstanding line (Outstanding > 0) in light yellow
+
                 def _highlight(row):
                     return ["background-color: #fff3cd" if row["Outstanding"] > 0 else "" for _ in row]
-            
-                styled = detail_display.style.apply(_highlight, axis=1).set_properties(**{"text-align": "left"})
-                tab.dataframe(styled, use_container_width=True, hide_index=True)
 
+                styled = (
+                    detail_display
+                    .style
+                    .apply(_highlight, axis=1)
+                    .set_properties(**{"text-align": "left"})
+                )
+                tab.dataframe(styled, use_container_width=True, hide_index=True)
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
