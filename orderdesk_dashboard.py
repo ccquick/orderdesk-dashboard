@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import datetime
 
 import pandas as pd
 pd.set_option("display.max_colwidth", None)
@@ -20,6 +21,7 @@ SHEET_URL = (
     "/edit#gid=1789939189"
 )
 RAW_TAB_NAME = "raw_orders"
+PO_LINKS_TAB_NAME = "po_links"  # New tab for PO links data
 LOCAL_TZ = "America/Toronto"
 # -----------------------------------------------------------------------------
 
@@ -27,7 +29,7 @@ LOCAL_TZ = "America/Toronto"
 # DATA ACCESS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_worksheet():
+def get_worksheet(tab_name):
     b64 = os.getenv("GOOGLE_SERVICE_KEY_B64")
     if not b64:
         st.error("🚨 Missing GOOGLE_SERVICE_KEY_B64 in Secrets")
@@ -41,15 +43,30 @@ def get_worksheet():
         ],
     )
     client = gspread.authorize(creds)
-    return client.open_by_url(SHEET_URL).worksheet(RAW_TAB_NAME)
+    sheet = client.open_by_url(SHEET_URL).worksheet(tab_name)
+    return sheet, client.open_by_url(SHEET_URL)
+
+
+def get_last_updated_time():
+    try:
+        # Get the file metadata from Drive API
+        _, spreadsheet = get_worksheet(RAW_TAB_NAME)
+        
+        # Format the timestamp in local timezone
+        local_tz = datetime.datetime.now().astimezone().tzinfo
+        current_time = datetime.datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S")
+        
+        return current_time
+    except Exception as e:
+        return "Unknown"
 
 
 def load_data():
     """Read Google Sheet → tidy types → add helper columns."""
-    ws = get_worksheet()
+    ws, _ = get_worksheet(RAW_TAB_NAME)
     df = pd.DataFrame(ws.get_all_records())
 
-    # column‑name harmonisation (older search called it “Type”)
+    # column‑name harmonisation (older search called it "Type")
     if "Type" in df.columns and "Item Type" not in df.columns:
         df = df.rename(columns={"Type": "Item Type"})
 
@@ -112,6 +129,97 @@ def load_data():
     return df
 
 
+def load_po_data():
+    """Read PO links from Google Sheet."""
+    try:
+        ws, _ = get_worksheet(PO_LINKS_TAB_NAME)
+        df = pd.DataFrame(ws.get_all_records())
+        
+        # Clean up column names and extract order numbers without "#"
+        if "Sales Order" in df.columns:
+            # Extract numeric part from "Sales Order #43244"
+            df["Sales Order Number"] = df["Sales Order"].str.extract(r'#?(\d+)').astype(int)
+        
+        # Convert ETA to datetime
+        if "ETA" in df.columns:
+            df["ETA"] = pd.to_datetime(df["ETA"], errors="coerce")
+            
+        return df
+    except Exception as e:
+        st.warning(f"Unable to load PO links data: {str(e)}")
+        return pd.DataFrame()  # Return empty DataFrame on error
+
+
+def get_po_status_summary(order_num, po_data):
+    """Generate PO status summary for an order."""
+    if po_data.empty:
+        return ""
+        
+    # Filter PO data for this order
+    pos = po_data[po_data["Sales Order Number"] == order_num]
+    if pos.empty:
+        return ""
+    
+    received = sum(pos["Status"].str.lower() == "received")
+    total = len(pos)
+    
+    if received == total:
+        return "✅ All POs Received"
+    elif received > 0:
+        return f"🔄 {received}/{total} POs Received"
+    else:
+        # Find closest ETA
+        etas = pos["ETA"].dropna()
+        if etas.empty:
+            return "⏳ Awaiting POs (No ETA)"
+        
+        today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
+        closest_eta = min(etas)
+        days_away = (closest_eta - today).days
+        
+        if days_away <= 0:
+            return "⚠️ PO ETA has passed"
+        else:
+            # Include the PO number if there's only one
+            if len(pos) == 1:
+                po_num = pos["Linked PO"].iloc[0]
+                return f"⏳ PO {po_num} due in {days_away}d"
+            else:
+                return f"⏳ Next PO due in {days_away}d"
+
+
+def display_color_legend():
+    """Display a legend explaining the color coding used in the dashboard."""
+    st.markdown("### Color Legend")
+    
+    # Create a 2x2 grid for the color legends
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+        <div style="display: flex; align-items: center; margin-bottom: 8px;">
+            <div style="background-color: #f8d7da; width: 20px; height: 20px; margin-right: 8px;"></div>
+            <span>Overdue Orders</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 8px;">
+            <div style="background-color: #fff3cd; width: 20px; height: 20px; margin-right: 8px;"></div>
+            <span>Partially Fulfilled Orders</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("""
+        <div style="display: flex; align-items: center; margin-bottom: 8px;">
+            <div style="background-color: #cfe2ff; width: 20px; height: 20px; margin-right: 8px;"></div>
+            <span>Rush Orders</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 8px;">
+            <span style="margin-right: 8px;">🧪</span>
+            <span>Chemical Orders</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #   STREAMLIT APP
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,8 +227,11 @@ def load_data():
 def main():
     st.set_page_config(page_title="Orderdesk Dashboard", layout="wide")
     st.title("📦 Orderdesk Shipment Status Dashboard")
-
+    
+    last_updated = get_last_updated_time()
+    
     df = load_data()
+    po_data = load_po_data()
 
     # ── KPI cards ───────────────────────────────────────────────
     overdue_orders = df.loc[
@@ -139,20 +250,15 @@ def main():
 
     drop_orders = df.loc[df["Is Drop Ship"], "Document Number"].nunique()
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     c1.metric("Overdue", int(overdue_orders))
     c2.metric("Due Tomorrow", int(due_orders))
     c3.metric("Drop Shipments", int(drop_orders))
-
-    # ── sidebar filters ─────────────────────────────────────────
-    with st.sidebar:
-        st.header("Filters")
-        customers = st.multiselect("Customer", sorted(df["Name"].unique()))
-        rush_only = st.checkbox("Rush orders only")
-        if customers:
-            df = df[df["Name"].isin(customers)]
-        if rush_only and "Rush Order" in df.columns:
-            df = df[df["Rush Order"].str.capitalize() == "Yes"]
+    c4.markdown(f"<div style='text-align: right; padding-top: 20px; color: #888;'>Last updated: {last_updated}</div>", unsafe_allow_html=True)
+    
+    # Display color legend
+    with st.expander("Show Color Legend", expanded=False):
+        display_color_legend()
 
     # ── create tabs ────────────────────────────────────────────
     tab_overdue, tab_due, tab_drop = st.tabs(
@@ -192,7 +298,7 @@ def main():
         # -------------------------------------------------------
         summary = (
             sub.groupby(
-                ["Document Number", "Name", "Ship Date", "Status"],
+                ["Document Number", "Name", "Ship Date", "Status", "Rush Order"],
                 as_index=False,
             )
             .agg({
@@ -213,6 +319,45 @@ def main():
 
         summary["Ship Date"] = summary["Ship Date"].dt.date  # drop time
 
+        # Add PO status information
+        if not po_data.empty:
+            summary["PO Status"] = summary["Order #"].apply(
+                lambda o: get_po_status_summary(o, po_data)
+            )
+            
+            # Create a priority field for sorting
+            def get_priority(row):
+                # Rush orders are highest priority
+                if "Rush Order" in row and row["Rush Order"].capitalize() == "Yes":
+                    priority = 0
+                # Orders with "PO ETA has passed" are next highest priority
+                elif "PO Status" in row and "PO ETA has passed" in str(row["PO Status"]):
+                    priority = 1
+                # Orders with no PO dependency are next
+                elif "PO Status" in row and row["PO Status"] == "":
+                    priority = 2
+                # Orders with "All POs Received" are next
+                elif "PO Status" in row and "All POs Received" in str(row["PO Status"]):
+                    priority = 3
+                # Orders with some POs received are next
+                elif "PO Status" in row and "POs Received" in str(row["PO Status"]):
+                    priority = 4
+                # Orders waiting on POs with no ETA are next
+                elif "PO Status" in row and "No ETA" in str(row["PO Status"]):
+                    priority = 5
+                # Orders waiting on POs with future ETAs are lowest priority
+                else:
+                    priority = 6
+                return priority
+                
+            summary["Priority"] = summary.apply(get_priority, axis=1)
+            
+            # Sort by priority (highest first), then by Days Late (highest first)
+            if "Days Late" in summary.columns:
+                summary = summary.sort_values(["Days Late", "Priority"], ascending=[False, True])
+            else:
+                summary = summary.sort_values(["Priority", "Ship Date"], ascending=[True, True])
+
         # Chemical order flag (Assembly/BOM with outstanding qty)
         def has_active_bom(o):
             mask = (
@@ -223,7 +368,7 @@ def main():
             return mask.any()
 
         summary["Chemical Order Flag"] = summary["Order #"].apply(
-            lambda o: "⚠️" if has_active_bom(o) else ""
+            lambda o: "🧪" if has_active_bom(o) else ""
         )
 
         cols = [
@@ -231,8 +376,10 @@ def main():
             "Customer",
             "Ship Date",
             "Status",
+            "PO Status",  # New column for PO status
             "Delay Comments",
             "Chemical Order Flag",
+            "Rush Order",
         ]
         if bucket == "Overdue":
             cols.append("Days Late")
@@ -241,7 +388,13 @@ def main():
         # Styling
         # -------------------------------------------------------
         def row_color(r):
-            if bucket == "Overdue" or bucket == "Drop Shipments":
+            # Check if it's a rush order
+            is_rush = r["Rush Order"].capitalize() == "Yes" if "Rush Order" in r else False
+            
+            if is_rush:
+                # Highlight rush orders in blue
+                bg = "#cfe2ff"  # light blue color
+            elif bucket == "Overdue" or bucket == "Drop Shipments":
                 bg = (
                     "#fff3cd"
                     if r["Status"] == "Pending Billing/Partially Fulfilled"
@@ -251,8 +404,11 @@ def main():
                 bg = "#ffffff"
             return [f"background-color: {bg}"] * len(r)
 
+        # Create a list of columns to show (excluding "Rush Order" which we only use for styling)
+        display_cols = [col for col in cols if col != "Rush Order"]
+        
         styler = (
-            summary[cols]
+            summary[display_cols]
             .style
             .apply(row_color, axis=1)
             .set_properties(**{"text-align": "left"})
@@ -275,6 +431,8 @@ def main():
             on = int(sel.split()[1])
             detail = sub[sub["Document Number"] == on]
             detail = detail.drop_duplicates(subset=["Item"])  # dedupe items
+            
+            # First show order line items
             with tab.expander("▶ Full line-item details", expanded=True):
                 detail_display = detail[
                     [
@@ -308,6 +466,14 @@ def main():
                     .set_properties(**{"text-align": "left"})
                 )
                 tab.dataframe(styled, use_container_width=True, hide_index=True)
+            
+            # Then show linked PO information if available
+            if not po_data.empty:
+                po_info = po_data[po_data["Sales Order Number"] == on]
+                if not po_info.empty:
+                    with tab.expander("📦 Purchase Order Information", expanded=True):
+                        po_display = po_info[["Linked PO", "Vendor", "ETA", "Status", "ControlChem Pickup"]]
+                        tab.dataframe(po_display, use_container_width=True, hide_index=True)
 
     st.caption("Data auto-refreshes hourly from NetSuite ➜ Google Sheet ➜ Streamlit")
 
