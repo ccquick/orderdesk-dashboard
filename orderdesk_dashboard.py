@@ -372,17 +372,25 @@ def main():
         )
 
         cols = [
+            # 'Days Late' first if present
+        ]
+        if bucket == "Overdue" and "Days Late" in summary.columns:
+            cols.append("Days Late")
+        cols += [
             "Order #",
             "Customer",
             "Ship Date",
+            "Chemical Order Flag",
             "Status",
             "PO Status",  # New column for PO status
             "Delay Comments",
-            "Chemical Order Flag",
             "Rush Order",
         ]
-        if bucket == "Overdue":
-            cols.append("Days Late")
+        # Remove 'Days Late' from the end if present
+        if bucket == "Overdue" and "Days Late" in cols[1:]:
+            cols.remove("Days Late")
+        # Create a list of columns to show (excluding "Rush Order" which we only use for styling)
+        display_cols = [col for col in cols if col != "Rush Order"]
 
         # -------------------------------------------------------
         # Styling
@@ -390,7 +398,6 @@ def main():
         def row_color(r):
             # Check if it's a rush order
             is_rush = r["Rush Order"].capitalize() == "Yes" if "Rush Order" in r else False
-            
             if is_rush:
                 # Highlight rush orders in blue
                 bg = "#cfe2ff"  # light blue color
@@ -404,16 +411,25 @@ def main():
                 bg = "#ffffff"
             return [f"background-color: {bg}"] * len(r)
 
-        # Create a list of columns to show (excluding "Rush Order" which we only use for styling)
-        display_cols = [col for col in cols if col != "Rush Order"]
-        
-        styler = (
+        column_config = {
+            "Days Late": st.column_config.NumberColumn("Days Late", width="small"),
+            "Order #": st.column_config.TextColumn("Order #", width="small"),
+            "Customer": st.column_config.TextColumn("Customer", width="medium"),
+            "Ship Date": st.column_config.TextColumn("Ship Date", width="small"),
+            "Chemical Order Flag": st.column_config.TextColumn("Chem", width="small"),
+            "Status": st.column_config.TextColumn("Status", width="medium"),
+            "PO Status": st.column_config.TextColumn("PO Status", width="large"),
+            "Delay Comments": st.column_config.TextColumn("Delay Comments", width="large"),
+        }
+        tab.dataframe(
             summary[display_cols]
-            .style
-            .apply(row_color, axis=1)
-            .set_properties(**{"text-align": "left"})
+                .style
+                .apply(row_color, axis=1)
+                .set_properties(**{"text-align": "left"}),
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config
         )
-        tab.dataframe(styler, use_container_width=True, hide_index=True)
 
         # -------------------------------------------------------
         # Line‑item drill‑down
