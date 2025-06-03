@@ -421,15 +421,48 @@ def main():
             "PO Status": st.column_config.TextColumn("PO Status", width="large"),
             "Delay Comments": st.column_config.TextColumn("Delay Comments", width="large"),
         }
-        tab.dataframe(
-            summary[display_cols]
-                .style
-                .apply(row_color, axis=1)
-                .set_properties(**{"text-align": "left"}),
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config
-        )
+
+        if bucket == "Overdue":
+            # Define what counts as actionable
+            actionable_mask = (
+                summary["PO Status"].isin(["", "✅ All POs Received"]) |
+                summary["PO Status"].str.contains("POs Received", na=False)
+            )
+            actionable_orders = summary[actionable_mask]
+            waiting_on_po_orders = summary[~actionable_mask]
+
+            # Show main actionable table (with your current styling)
+            tab.dataframe(
+                actionable_orders[display_cols]
+                    .style
+                    .apply(row_color, axis=1)
+                    .set_properties(**{"text-align": "left"}),
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config
+            )
+
+            # Show secondary table for waiting on PO (neutral style)
+            if not waiting_on_po_orders.empty:
+                tab.markdown("#### Orders Waiting on PO (not actionable)")
+                tab.dataframe(
+                    waiting_on_po_orders[display_cols]
+                        .style
+                        .set_properties(**{"background-color": "#f5f5f5", "text-align": "left"}),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=column_config
+                )
+        else:
+            tab.dataframe(
+                summary[display_cols]
+                    .style
+                    .apply(row_color, axis=1)
+                    .set_properties(**{"text-align": "left"}),
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config
+            )
 
         # -------------------------------------------------------
         # Line‑item drill‑down
