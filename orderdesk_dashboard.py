@@ -3,6 +3,7 @@ import os
 import json
 import base64
 import datetime
+import re
 
 import pandas as pd
 pd.set_option("display.max_colwidth", None)
@@ -155,7 +156,7 @@ def get_po_status_summary(order_num, po_data):
     """Generate PO status summary for an order."""
     if po_data.empty:
         return ""
-        
+    
     # Filter PO data for this order
     pos = po_data[po_data["Sales Order Number"] == order_num]
     if pos.empty:
@@ -163,6 +164,13 @@ def get_po_status_summary(order_num, po_data):
     
     received = sum(pos["Status"].str.lower() == "received")
     total = len(pos)
+    not_received_pos = pos[pos["Status"].str.lower() != "received"]
+    # Extract just the PO number (with #) from 'Linked PO'
+    def extract_po_num(s):
+        match = re.search(r'#\d+', str(s))
+        return match.group(0) if match else str(s)
+    po_nums = not_received_pos["Linked PO"].dropna().apply(extract_po_num).tolist()
+    po_nums_str = ", ".join(po_nums) if po_nums else ""
     
     if received == total:
         return "✅ All POs Received"
@@ -170,23 +178,23 @@ def get_po_status_summary(order_num, po_data):
         return f"🔄 {received}/{total} POs Received"
     else:
         # Find closest ETA
-        etas = pos["ETA"].dropna()
-        if etas.empty:
-            return "⏳ Awaiting POs (No ETA)"
-        
+        etas = not_received_pos["ETA"].dropna()
         today = pd.Timestamp.now(tz=LOCAL_TZ).normalize().tz_localize(None)
+        if etas.empty:
+            if po_nums_str:
+                return f"⏳ Awaiting PO {po_nums_str} (No ETA)"
+            else:
+                return "⏳ Awaiting POs (No ETA)"
         closest_eta = min(etas)
         days_away = (closest_eta - today).days
-        
+        # Find PO(s) with the closest ETA
+        closest_pos = not_received_pos[not_received_pos["ETA"] == closest_eta]
+        closest_po_nums = closest_pos["Linked PO"].dropna().apply(extract_po_num).tolist()
+        closest_po_str = ", ".join(closest_po_nums) if closest_po_nums else po_nums_str
         if days_away <= 0:
-            return "⚠️ PO ETA has passed"
+            return f"⚠️ PO {closest_po_str} ETA has passed"
         else:
-            # Include the PO number if there's only one
-            if len(pos) == 1:
-                po_num = pos["Linked PO"].iloc[0]
-                return f"⏳ PO {po_num} due in {days_away}d"
-            else:
-                return f"⏳ Next PO due in {days_away}d"
+            return f"⏳ PO {closest_po_str} due in {days_away}d"
 
 
 def display_color_legend():
